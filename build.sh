@@ -14,9 +14,25 @@ if [ -d "$APP" ]; then
   REPLACED="$TRASH"
 fi
 
-mkdir -p "$APP/Contents/MacOS"
+# 1) 图标：assets/icon_1024.png → AppIcon.icns
+ICONSET="$(mktemp -d)/AppIcon.iconset"
+mkdir -p "$ICONSET"
+for s in 16 32 64 128 256 512 1024; do
+  sips -z $s $s assets/icon_1024.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+done
+# @2x 命名规范（16/32/128/256/512 的两倍图）
+cp "$ICONSET/icon_32x32.png"   "$ICONSET/icon_16x16@2x.png"
+cp "$ICONSET/icon_64x64.png"   "$ICONSET/icon_32x32@2x.png"
+cp "$ICONSET/icon_256x256.png" "$ICONSET/icon_128x128@2x.png"
+cp "$ICONSET/icon_512x512.png" "$ICONSET/icon_256x256@2x.png"
+cp "$ICONSET/icon_1024x1024.png" "$ICONSET/icon_512x512@2x.png"
+ICNS="$HOME/.dsh-shell.AppIcon.icns"
+iconutil -c icns "$ICONSET" -o "$ICNS"
+
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp src/launcher.sh "$APP/Contents/MacOS/dsh"
 chmod +x "$APP/Contents/MacOS/dsh"
+cp "$ICNS" "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -26,6 +42,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundleIdentifier</key><string>com.jimmy.dsh-shell</string>
   <key>CFBundleExecutable</key><string>dsh</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
 </dict>
 </plist>
 EOF
