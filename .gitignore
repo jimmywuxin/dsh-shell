@@ -1,8 +1,2 @@
-# macOS
 .DS_Store
-._*
-
-# 运行产物（本仓只管源码，产物装到 ~/Applications）
-*.log
-build/
-dist/
+.workbuddy/

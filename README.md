@@ -8,7 +8,7 @@ DSH Web GUI 的纯 UI 桌面壳：Edge `--app` 独立窗口 + launchd 服务常�
 ## 状态
 
 - **方案**：定稿走渐进路线（2026-08-29 晚 Jimmy 拍板）——**先 ①A**（Edge `--app` 窗口 + .app 内嵌守护，零系统改动），跑两周后按实际使用频率决定是否升 ①B（launchd 常驻）
-- **开发**：待开发（开发者：杨杨）；A 阶段只做 launcher.sh + build.sh（.app 部分），plist / dsh-restart 属 B 阶段
+- **开发**：A 阶段已完成并验收通过（2026-08-29 晚，开发者：杨杨）——launcher.sh + build.sh 已交付，.app 已构建至 `~/Applications/dsh.app`；热启动（服务在跑 → 窗口秒开）与冷启动（服务没跑 → 2.3s 自动拉起）均真机验证通过；过程中修复代理环境变量导致服务探测误判的 bug（curl 加 `--noproxy`）；plist / dsh-restart 属 B 阶段未动
 - **起草**：热巴（需求调研 + 方案设计 + 环境核查）
 
 ## 架构（三层职责分离）
