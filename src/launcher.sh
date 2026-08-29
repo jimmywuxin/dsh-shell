@@ -4,10 +4,20 @@
 # B 阶段升级 launchd 后：删掉「拉起」段即可，等待逻辑原样保留
 set -u
 
+# Finder 双击启动时 PATH 只有 /usr/bin:/bin 等系统路径，找不到 node
+# （dsh 是 #!/usr/bin/env node 脚本）——显式补上 node 所在目录
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 URL="http://127.0.0.1:3080"
 EDGE="/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
 DSH_BIN="$HOME/.npm-global/bin/dsh"
 LOG_DIR="$HOME/.dsh"
+
+# 前置保护：node 不可用则直接提示，不傻等 30s
+if ! command -v node >/dev/null 2>&1; then
+  osascript -e 'display notification "未找到 node，无法拉起 dsh web" with title "DSH"'
+  exit 1
+fi
 
 port_ready() {
   # --noproxy：本机地址不走代理，防止代理 502 被误判为「服务就绪」
