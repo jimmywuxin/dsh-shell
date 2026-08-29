@@ -44,5 +44,6 @@ uninstall.sh                       ← 完整卸载（产物 + 服务 + PATH 命
 | nativefier | ❌ 2023-09 已归档 |
 | Tauri / Swift 自研壳 | ❌ 暂不，收益只是换内核 |
 | **Edge --app + 进程层渐进（A→B）** | ✅ 窗口兼容性零风险；A/B 全解耦可逆，按使用频率演化 |
+| B 阶段暂缓（2026-08-30 Jimmy 决定） | dsh 起步阶段，后续可能有破坏性变化，越简单越好——不设时间表，有真实需求（自启/崩溃自愈）再升 |
 | Swift WKWebView 壳（②） | ❌ Safari 系内核对 Chromium 生态 GUI 有兼容风险，服务内存才是大头 |
 | API key 环境变量 | ✅ 五个 key 已在 launchctl 全局，LaunchAgent 可继承（2026-08-29 已核） |
