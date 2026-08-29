@@ -7,18 +7,18 @@ DSH Web GUI 的纯 UI 桌面壳：Edge `--app` 独立窗口 + launchd 服务常�
 
 ## 状态
 
-- **方案**：已与 Jimmy 逐项确认定稿（2026-08-29）——① Edge `--app` 窗口 + B launchd 常驻
-- **开发**：待开发（开发者：杨杨）
+- **方案**：定稿走渐进路线（2026-08-29 晚 Jimmy 拍板）——**先 ①A**（Edge `--app` 窗口 + .app 内嵌守护，零系统改动），跑两周后按实际使用频率决定是否升 ①B（launchd 常驻）
+- **开发**：待开发（开发者：杨杨）；A 阶段只做 launcher.sh + build.sh（.app 部分），plist / dsh-restart 属 B 阶段
 - **起草**：热巴（需求调研 + 方案设计 + 环境核查）
 
 ## 架构（三层职责分离）
 
 ```
-launchd（服务层）        —— 唯一拉起方：RunAtLoad + KeepAlive 管 dsh web 生死
+进程层（渐进）           —— A: .app 内嵌守护（双击拉起）→ 视频率升级 B: launchd 常驻
    ↓ 127.0.0.1:3080
-launcher.sh（胶水层）    —— 只做两件事：等端口就绪 → 开 Edge --app 窗口
+launcher.sh（胶水层）    —— 只做两件事：等服务就绪 → 开 Edge --app 窗口
    ↓
-Edge --app 窗口（UI 层） —— 纯渲染，不管进程
+Edge --app 窗口（UI 层） —— 纯渲染，不管进程；兼容性零风险（Edge 内核 = 平时访问 GUI 的内核）
 ```
 
 纪律：launchd 是唯一的进程拉起方，launcher.sh 不允许再拉起（防双实例）。
@@ -43,5 +43,6 @@ uninstall.sh                       ← 完整卸载（产物 + 服务 + PATH 命
 | dsh-desktop（★21.8k） | ❌ Electron 全家桶过重，进程管理/托盘/市场全是冗余 |
 | nativefier | ❌ 2023-09 已归档 |
 | Tauri / Swift 自研壳 | ❌ 暂不，收益只是换内核 |
-| **Edge --app + launchd** | ✅ 零依赖零打包，组件全稳定契约 |
+| **Edge --app + 进程层渐进（A→B）** | ✅ 窗口兼容性零风险；A/B 全解耦可逆，按使用频率演化 |
+| Swift WKWebView 壳（②） | ❌ Safari 系内核对 Chromium 生态 GUI 有兼容风险，服务内存才是大头 |
 | API key 环境变量 | ✅ 五个 key 已在 launchctl 全局，LaunchAgent 可继承（2026-08-29 已核） |
