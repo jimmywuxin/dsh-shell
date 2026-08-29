@@ -52,6 +52,11 @@ if [ -n "$REPLACED" ]; then
   echo "旧产物已移至废纸篓：$REPLACED"
 fi
 
+# 2) dsh-restart 装进 PATH（插件更新后重启服务用；A 阶段手动停+起）
+cp dsh-restart "$HOME/.npm-global/bin/dsh-restart"
+chmod +x "$HOME/.npm-global/bin/dsh-restart"
+echo "dsh-restart 已就位：\$ dsh-restart"
+
 # ── B 阶段骨架（届时取消注释）─────────────────────────────
 # PLIST_DST="$HOME/Library/LaunchAgents/com.jimmy.dsh-web.plist"
 # # 2) 安装 launchd 服务

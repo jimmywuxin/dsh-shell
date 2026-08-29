@@ -1,0 +1,31 @@
+#!/bin/bash
+# dsh-restart：插件安装/更新后重启 dsh web 服务
+# A 阶段：手动停+起（无 launchd）；B 阶段升级后换成 launchctl kickstart -k 一行
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+URL="http://127.0.0.1:3080"
+DSH_BIN="$HOME/.npm-global/bin/dsh"
+LOG_DIR="$HOME/.dsh"
+
+# 1) 停（没在跑就跳过），等端口释放
+pkill -f "dsh web" 2>/dev/null && sleep 1
+for i in $(seq 1 10); do
+  curl -s -o /dev/null --noproxy '*' --max-time 1 "$URL" || break
+  sleep 0.5
+done
+
+# 2) 起（日志与 launcher.sh 同一套，路径与 B 阶段 plist 约定一致）
+mkdir -p "$LOG_DIR"
+nohup "$DSH_BIN" web --no-open >> "$LOG_DIR/web.log" 2>> "$LOG_DIR/web.err.log" &
+
+# 3) 等就绪（最多 30s）
+for i in $(seq 1 60); do
+  if curl -s -o /dev/null --noproxy '*' --max-time 1 "$URL"; then
+    echo "dsh web 已重启"
+    exit 0
+  fi
+  sleep 0.5
+done
+
+echo "dsh web 重启失败，查看 ~/.dsh/web.err.log" >&2
+exit 1
