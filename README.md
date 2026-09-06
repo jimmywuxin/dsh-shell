@@ -31,6 +31,7 @@ src/
 └── com.jimmy.dsh-web.plist        ← launchd 服务定义（§4.2）
 build.sh                           ← 组装 .app → ~/Applications + 装 launchd（§4.3）
 dsh-restart                        ← 升级后重启服务，装进 PATH（§4.4）
+dsh-kill                           ← 只停 dsh web 服务（dsh-restart 的只停版，同款进程匹配/端口判据）
 uninstall.sh                       ← 完整卸载（产物 + 服务 + PATH 命令）
 ```
 

@@ -56,6 +56,10 @@ fi
 cp dsh-restart "$HOME/.npm-global/bin/dsh-restart"
 chmod +x "$HOME/.npm-global/bin/dsh-restart"
 echo "dsh-restart 已就位：\$ dsh-restart"
+# 2b) dsh-kill 装进 PATH（只停不重启：dsh-restart 的只停版）
+cp dsh-kill "$HOME/.npm-global/bin/dsh-kill"
+chmod +x "$HOME/.npm-global/bin/dsh-kill"
+echo "dsh-kill 已就位：\$ dsh-kill"
 
 # ── B 阶段骨架（届时取消注释）─────────────────────────────
 # PLIST_DST="$HOME/Library/LaunchAgents/com.jimmy.dsh-web.plist"

@@ -1,0 +1,31 @@
+#!/bin/bash
+# dsh-kill：停止 dsh web 服务（dsh-restart 的只停版，不重启）
+# 与 dsh-restart 同一套进程匹配（pkill -f "dsh web"）与端口判据（127.0.0.1:3080）
+# A 阶段：手动停（无 launchd）；B 阶段升级后需先 launchctl 停服务再 kill，防自动拉起
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+URL="http://127.0.0.1:3080"
+
+# 1) 停：先 SIGTERM，让进程正常退出
+if pkill -f "dsh web" 2>/dev/null; then
+  echo "dsh web 终止信号已发出，等待停止…"
+else
+  echo "dsh web 未在运行（无匹配进程）"
+fi
+
+# 2) 等端口释放（至多 15s）
+for i in $(seq 1 30); do
+  curl -s -o /dev/null --noproxy '*' --max-time 1 "$URL" || { echo "dsh web 已停止"; exit 0; }
+  sleep 0.5
+done
+
+# 3) SIGTERM 未退净：SIGKILL 兜底，再等 5s
+echo "进程未退出，尝试强制终止…" >&2
+pkill -9 -f "dsh web" 2>/dev/null
+for i in $(seq 1 10); do
+  curl -s -o /dev/null --noproxy '*' --max-time 1 "$URL" || { echo "dsh web 已停止（强制终止）"; exit 0; }
+  sleep 0.5
+done
+
+echo "dsh web 停止失败：端口 3080 仍被占用，查看 ~/.dsh/web.err.log" >&2
+exit 1
