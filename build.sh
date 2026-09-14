@@ -85,20 +85,38 @@ if [ -n "$REPLACED" ]; then
 fi
 
 # ── 4) launchd 服务：渲染模板 → 安装 ───────────────────────
-NODE_BIN="$(command -v node || true)"
-if [ -z "$NODE_BIN" ]; then
-  # PATH 干净时（launchd / cron 等非登录 shell 环境）按已知位置兜底：
-  # launchd 不读 shell 的 PATH，而这些环境跑 build.sh 是常态（如修复作业）
-  NODE_LATEST="$(ls -1 "$HOME"/.workbuddy/binaries/node/versions/*/bin/node 2>/dev/null | sort -V | tail -1)"
-  for c in /opt/homebrew/bin/node /usr/local/bin/node "$NODE_LATEST"; do
-    if [ -x "$c" ]; then NODE_BIN="$c"; break; fi
-  done
+# node 选择：**只用本机独立安装的 node，排除 WorkBuddy 内置的**。
+#   ~/.workbuddy/binaries/node/... 随 WorkBuddy 自身升级/清理而变动，且在本 shell 里
+#   PATH 前置，`command -v node` 只会命中它 —— 常驻服务不该依赖另一个 App 的内部目录。
+#   候选：~/.local/bin（手工 tarball）、Homebrew、/usr/local，外加 PATH 里非 WorkBuddy
+#   的 node；取版本号最高者。launchd 不读 shell 的 PATH，故必须绝对路径。
+# 注：此处不用 `case ... in */x/*)` 也不把整个循环塞进 $( )——macOS 自带 bash 3.2
+#     解析 `$( )` 内的 case 模式会误判结尾括号（本次实测报 syntax error）。
+NODE_CANDS=""
+for c in "$HOME/.local/bin/node" /opt/homebrew/bin/node /usr/local/bin/node; do
+  if [ -x "$c" ]; then NODE_CANDS="$NODE_CANDS$c"$'\n'; fi
+done
+PATH_NODE="$(command -v node 2>/dev/null || true)"
+if [ -n "$PATH_NODE" ] && [ "${PATH_NODE#*/.workbuddy/}" = "$PATH_NODE" ]; then
+  NODE_CANDS="$NODE_CANDS$PATH_NODE"$'\n'
 fi
+
+NODE_BIN=""
+NODE_VER=""
+for c in $NODE_CANDS; do
+  v="$("$c" --version 2>/dev/null | sed 's/^v//')"
+  if [ -n "$v" ]; then
+    if [ -z "$NODE_VER" ] || [ "$(printf '%s\n%s\n' "$NODE_VER" "$v" | sort -V | tail -1)" = "$v" ]; then
+      NODE_VER="$v"; NODE_BIN="$c"
+    fi
+  fi
+done
 if [ -z "$NODE_BIN" ]; then
-  echo "错误：找不到 node（PATH 与已知位置都没有），无法渲染 plist（launchd 需要绝对路径）" >&2
+  echo "错误：本机没有独立安装的 node（已排除 WorkBuddy 内置的），无法渲染 plist。" >&2
+  echo "  请先装 node：brew install node，或从 https://nodejs.org 解压到 ~/.local" >&2
   exit 1
 fi
-echo "node: $NODE_BIN"
+echo "node: $NODE_BIN (v$NODE_VER)"
 DSH_JS="$HOME/.npm-global/lib/node_modules/@deepseek-ai/dsh/lib/bin.js"
 if [ ! -f "$DSH_JS" ]; then
   echo "错误：找不到 dsh 入口 ${DSH_JS}，请先 npm i -g @deepseek-ai/dsh" >&2

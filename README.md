@@ -14,6 +14,7 @@ DSH Web GUI 的纯 UI 桌面壳：Edge `--app` 独立窗口 + launchd 服务常�
   - 非托管分支的进程匹配修正为真实 argv（`node …/dsh/lib/bin.js --profile web`）——旧的 `pkill -f "dsh web"` 一个进程都匹配不到
   - `launcher.sh` 删除自拉段（改为 `launchctl kickstart -k`），就绪判据改用 HTTP 状态码，并支持 401 时用 web.log 里的 token URL 直开
   - launchd plist 纳入仓库（`src/ai.dsh.web.plist`，构建时渲染），`build.sh` 不再无条件覆盖线上脚本
+  - plist 里的 node **只取本机独立安装的**（`~/.local/bin` → Homebrew → `/usr/local`，取版本最高者），显式排除 WorkBuddy 内置的 `~/.workbuddy/binaries/node/...`：那是另一个 App 的内部目录，随它升级/清理而变动，常驻服务不该依赖；本机没有独立 node 时 `build.sh` 直接报错退出，不静默回退
 - **起草**：热巴（需求调研 + 方案设计 + 环境核查）
 
 ## 架构（三层职责分离）
