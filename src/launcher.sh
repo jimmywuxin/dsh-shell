@@ -36,7 +36,7 @@ if [ ! -x "$EDGE" ]; then
   exit 1
 fi
 if [ ! -x "$DSH_BIN" ] && ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-  notify "未找到 dsh（$DSH_BIN），且无 launchd 服务 $LABEL"
+  notify "未找到 dsh（${DSH_BIN}），且无 launchd 服务 $LABEL"
   exit 1
 fi
 

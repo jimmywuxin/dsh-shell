@@ -46,7 +46,7 @@ if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
   fi
   echo "launchctl bootout 失败，退回 pkill 路径…" >&2
 else
-  echo "未检测到 launchd 服务 $LABEL，走 pkill…"
+  echo "未检测到 launchd 服务 ${LABEL}，走 pkill…"
 fi
 
 # --- 未托管 / bootout 失败：pkill 路径 ---

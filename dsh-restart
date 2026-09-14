@@ -54,7 +54,7 @@ reap_stale_lock() {
   mkdir -p "$LOG_DIR/backups"
   cp "$LOCK" "$bak" 2>/dev/null
   if rm -f "$LOCK" 2>/dev/null; then
-    echo "  ⚠ 清掉失效锁 $LOCK（持有者 pid ${holder:-?} ≠ 当前实例 ${cur:-?}；备份 $bak）" >&2
+    echo "  ⚠ 清掉失效锁 ${LOCK}（持有者 pid ${holder:-?} ≠ 当前实例 ${cur:-?}；备份 ${bak}）" >&2
   else
     echo "  ⚠ 失效锁 $LOCK 存在但删不掉（持有者 pid ${holder:-?}），如需手动清理请先备份" >&2
   fi
@@ -72,7 +72,7 @@ if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
     for i in $(seq 1 60); do
       NEW_PID="$(pid_of)"
       if [ -n "$NEW_PID" ] && [ "$NEW_PID" != "$OLD_PID" ] && app_ready; then
-        echo "dsh web 已重启（launchd，pid ${OLD_PID:-?} -> $NEW_PID，HTTP $(probe_code)）"
+        echo "dsh web 已重启（launchd，pid ${OLD_PID:-?} -> ${NEW_PID}，HTTP $(probe_code)）"
         reap_stale_lock "$NEW_PID"
         exit 0
       fi
@@ -86,7 +86,7 @@ if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
 fi
 
 # --- 2) 非托管兜底：nohup 手起 ---
-echo "未检测到 launchd 服务 $LABEL，退回手动启动…"
+echo "未检测到 launchd 服务 ${LABEL}，退回手动启动…"
 pkill -f "$PROC_PATTERN" 2>/dev/null && sleep 1
 for i in $(seq 1 10); do
   app_ready || break

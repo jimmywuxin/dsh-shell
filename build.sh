@@ -16,6 +16,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# 用法：build.sh [--reload]
+#   --reload  允许 bootout + bootstrap 重载服务（**仅限真终端**）。默认不开：
+#             本 shell 的 bootstrap 必然失败，bootout 后服务会一直掉到重启电脑。
+RELOAD=0
+for arg in "$@"; do
+  if [ "$arg" = "--reload" ]; then RELOAD=1; fi
+done
+
 APP="$HOME/Applications/dsh.app"
 PLIST_DST="$HOME/Library/LaunchAgents/ai.dsh.web.plist"
 BIN_DIR="$HOME/.npm-global/bin"
@@ -93,7 +101,7 @@ fi
 echo "node: $NODE_BIN"
 DSH_JS="$HOME/.npm-global/lib/node_modules/@deepseek-ai/dsh/lib/bin.js"
 if [ ! -f "$DSH_JS" ]; then
-  echo "错误：找不到 dsh 入口 $DSH_JS，请先 npm i -g @deepseek-ai/dsh" >&2
+  echo "错误：找不到 dsh 入口 ${DSH_JS}，请先 npm i -g @deepseek-ai/dsh" >&2
   exit 1
 fi
 
@@ -106,25 +114,46 @@ s|@HOME@|$HOME|g
 }"
 sed -e "$SED_SCRIPT" src/ai.dsh.web.plist > "$PLIST_TMP"
 
+PLIST_CHANGED=0
 if [ -f "$PLIST_DST" ] && ! cmp -s "$PLIST_TMP" "$PLIST_DST"; then
   BAK="$PLIST_DST.bak-$(date +%Y%m%d%H%M%S)"
   cp "$PLIST_DST" "$BAK"
+  PLIST_CHANGED=1
   echo "旧 plist 已备份：$BAK"
 fi
 mkdir -p "$(dirname "$PLIST_DST")"
 cp "$PLIST_TMP" "$PLIST_DST"
 rm -f "$PLIST_TMP"
 
-# 重载服务（bootstrap 在部分环境下不可用，失败则退回 kickstart 重载）
-if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+# 重载服务
+#   安全默认：**不主动 bootout**。本 shell 环境（WorkBuddy 派生进程）里
+#   `launchctl bootstrap` 必然报 5: Input/output error，而 bootout 之后 drop 掉的
+#   服务在本会话内无法恢复 → 服务会一直停到重启电脑。2026-09-14 实踩两次。
+#   故：plist 变了且服务在跑时，只提示、不卸载；确需重载用 `bash build.sh --reload`
+#   （请在真终端里跑），或重启电脑。
+if [ "$PLIST_CHANGED" -eq 0 ]; then
+  echo "plist 无变化，跳过服务重载"
+elif ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  if launchctl bootstrap "$DOMAIN" "$PLIST_DST" 2>/dev/null; then
+    echo "launchd 服务已装载：$LABEL"
+  else
+    echo "警告：plist 已更新，但 bootstrap 失败（本环境限制）。请手动执行：" >&2
+    echo "  launchctl bootstrap $DOMAIN $PLIST_DST" >&2
+  fi
+elif [ "$RELOAD" -eq 1 ]; then
   launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-fi
-if launchctl bootstrap "$DOMAIN" "$PLIST_DST" 2>/dev/null; then
-  echo "launchd 服务已装载：$LABEL"
+  if launchctl bootstrap "$DOMAIN" "$PLIST_DST" 2>/dev/null; then
+    echo "launchd 服务已重载：$LABEL"
+  else
+    echo "错误：bootout 后 bootstrap 失败，服务已掉线！立即恢复：" >&2
+    echo "  在真终端跑 launchctl bootstrap $DOMAIN $PLIST_DST  （或重启电脑）" >&2
+    exit 1
+  fi
 else
-  echo "launchctl bootstrap 不可用，退回 kickstart 重载…"
-  launchctl kickstart -k "$DOMAIN/$LABEL" 2>/dev/null \
-    || echo "警告：服务未能重载，请手动 launchctl bootstrap $DOMAIN $PLIST_DST" >&2
+  echo "⚠ plist 已更新为新版本，但当前服务仍在用旧配置。"
+  echo "  已跳过自动重载（避免 bootout 后无法 bootstrap）。生效方式二选一："
+  echo "    · 重启电脑（登录时自动加载）"
+  echo "    · 真终端跑：launchctl bootout $DOMAIN/$LABEL && launchctl bootstrap $DOMAIN $PLIST_DST"
 fi
 
 # ── 5) 安装命令行工具（差异比对 + 备份，防降级） ───────────
@@ -136,7 +165,7 @@ install_cmd() {
   if [ -f "$dst" ] && ! cmp -s "$src" "$dst"; then
     bak="$dst.bak-$(date +%Y%m%d%H%M%S)"
     cp "$dst" "$bak"
-    echo "$name：线上版本与仓库不同，已备份到 $bak 后覆盖（请确认仓库版本确实是想要的版本）"
+    echo "${name}：线上版本与仓库不同，已备份到 ${bak} 后覆盖（请确认仓库版本确实是想要的版本）"
   fi
   cp "$src" "$dst"
   chmod +x "$dst"
