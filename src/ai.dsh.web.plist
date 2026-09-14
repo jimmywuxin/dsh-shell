@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dsh web 的 launchd 服务定义（模板，由 build.sh 渲染后安装到
+  ~/Library/LaunchAgents/ai.dsh.web.plist）。
+
+  占位符（build.sh 用 sed 替换，只作用于 <string> 行，不要手工编辑渲染产物）：
+    NODE   node 可执行文件绝对路径（launchd 不读 shell 的 PATH，必须绝对路径）
+    DSH    dsh 的 CLI 入口 lib/bin.js 绝对路径
+    HOME   用户家目录
+
+  要点：
+  - Label 是 ai.dsh.web（不是历史命名 com.jimmy.dsh-web），dsh-kill / dsh-restart /
+    launcher.sh 都以这个 label 为准，改这里要同步改那三个脚本。
+  - RunAtLoad + KeepAlive：登录即拉起、崩了自动重启。因此**任何停服务的操作都必须
+    走 launchctl bootout**，pkill 会被 KeepAlive 立刻复活。
+  - 不设 EnvironmentVariables：provider 的 apiKeyEnv 由 ~/.dsh/.credentials.yaml
+    的 refs 解析，服务进程不需要 shell 环境里的 key。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.dsh.web</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@NODE@</string>
+        <string>@DSH@</string>
+        <string>--profile</string>
+        <string>web</string>
+        <string>--no-open</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>@HOME@/.dsh/web.log</string>
+    <key>StandardErrorPath</key>
+    <string>@HOME@/.dsh/web.err.log</string>
+</dict>
+</plist>

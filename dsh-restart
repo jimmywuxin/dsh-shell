@@ -1,31 +1,110 @@
 #!/bin/bash
-# dsh-restart：插件安装/更新后重启 dsh web 服务
-# A 阶段：手动停+起（无 launchd）；B 阶段升级后换成 launchctl kickstart -k 一行
+# dsh-restart：重启 dsh web 服务
+#
+# 2026-09-14 改造：原版直接 pkill + nohup 手起，而服务已由 launchd 托管
+# （ai.dsh.web，KeepAlive=true）——pkill 杀掉的进程会被 launchd 立刻拉起，再 nohup
+# 一个手动实例，两边抢 127.0.0.1:3080，形成双实例。现改为：
+#   launchd 托管 → launchctl kickstart -k（原子重启，不产生双实例）
+#   非托管       → 退回原 nohup 逻辑（早期手起场景）
+#
+# 注 1：launchctl kickstart 在 WorkBuddy 的 shell 里可用（bootstrap 不可用），已实测。
+# 注 2：就绪判据必须看 HTTP 状态码，不能只看「端口有响应」——dsh 半启动态（插件树
+#       未加载完）照样 bind 3080 但返 404，只看连接性会误报成功。2026-09-14 实踩。
+# 注 3：kickstart -k 是强杀。若在上一实例启动途中就再次重启，它会带着
+#       ~/.dsh/.credentials.yaml.lock 一起死，留下失效锁 → 下一实例
+#       「atomic-write: timed out waiting for the writer lock」→ 崩溃循环。
+#       2026-09-14 深夜实踩（web.err.log 有完整栈，launchd runs 计数已到 14 次）。
+#       故重启后核对锁持有者：若不是当前实例，判定为失效锁并自动处理（先备份再删，
+#       因为此刻旧持有者已确定不在运行，留着的唯一后果就是下一次启动继续崩）。
+#
+# 注 4：非托管分支的进程匹配同样从 `pkill -f "dsh web"` 改为匹配真实 argv
+#       （`node …/dsh/lib/bin.js --profile web`），旧写法匹配不到任何进程。
+
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+LABEL="ai.dsh.web"
+DOMAIN="gui/$(id -u)"
 URL="http://127.0.0.1:3080"
+LOCK="$HOME/.dsh/.credentials.yaml.lock"
 DSH_BIN="$HOME/.npm-global/bin/dsh"
 LOG_DIR="$HOME/.dsh"
+PROC_PATTERN='bin\.js.*--profile web'
 
-# 1) 停（没在跑就跳过），等端口释放
-pkill -f "dsh web" 2>/dev/null && sleep 1
+pid_of()   { launchctl print "$DOMAIN/$LABEL" 2>/dev/null | awk '/pid = /{print $3; exit}'; }
+probe_code() {
+  local c
+  c=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 2 "$URL" 2>/dev/null)
+  printf '%s' "${c:-000}"
+}
+# 健康态：无 token 请求返 401。半启动态返 404、进程死了返 000、5xx 属异常。
+app_ready() {
+  case "$(probe_code)" in
+    000|404|5*) return 1 ;;
+    *)          return 0 ;;
+  esac
+}
+# 锁的持有者不是当前实例 → 失效锁（持有者已死，但锁文件还在）。
+# 只备份 + 删除，不静默吞掉：留着的唯一后果是下一次启动继续崩。
+reap_stale_lock() {
+  local cur="$1"
+  [ -f "$LOCK" ] || return 0
+  local holder; holder="$(cat "$LOCK" 2>/dev/null)"
+  [ "$holder" = "$cur" ] && return 0
+  local bak="$LOG_DIR/backups/.credentials.yaml.lock.stale-$(date +%Y%m%d%H%M%S)"
+  mkdir -p "$LOG_DIR/backups"
+  cp "$LOCK" "$bak" 2>/dev/null
+  if rm -f "$LOCK" 2>/dev/null; then
+    echo "  ⚠ 清掉失效锁 $LOCK（持有者 pid ${holder:-?} ≠ 当前实例 ${cur:-?}；备份 $bak）" >&2
+  else
+    echo "  ⚠ 失效锁 $LOCK 存在但删不掉（持有者 pid ${holder:-?}），如需手动清理请先备份" >&2
+  fi
+}
+
+# --- 1) launchd 托管：kickstart -k ---
+if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  OLD_PID="$(pid_of)"
+
+  # 重启前先处理上一轮遗留的失效锁，避免 kickstart 直接撞进崩溃循环
+  reap_stale_lock "$OLD_PID"
+
+  if launchctl kickstart -k "$DOMAIN/$LABEL"; then
+    # 等「PID 已换 + 应用真就绪」；只看端口会误判（见注 2）
+    for i in $(seq 1 60); do
+      NEW_PID="$(pid_of)"
+      if [ -n "$NEW_PID" ] && [ "$NEW_PID" != "$OLD_PID" ] && app_ready; then
+        echo "dsh web 已重启（launchd，pid ${OLD_PID:-?} -> $NEW_PID，HTTP $(probe_code)）"
+        reap_stale_lock "$NEW_PID"
+        exit 0
+      fi
+      sleep 0.5
+    done
+    echo "dsh web 重启超时（launchd），最近错误：" >&2
+    tail -20 "$LOG_DIR/web.err.log" >&2
+    exit 1
+  fi
+  echo "launchctl kickstart 失败，退回非托管路径…" >&2
+fi
+
+# --- 2) 非托管兜底：nohup 手起 ---
+echo "未检测到 launchd 服务 $LABEL，退回手动启动…"
+pkill -f "$PROC_PATTERN" 2>/dev/null && sleep 1
 for i in $(seq 1 10); do
-  curl -s -o /dev/null --noproxy '*' --max-time 1 "$URL" || break
+  app_ready || break
   sleep 0.5
 done
+reap_stale_lock ""
 
-# 2) 起（日志与 launcher.sh 同一套，路径与 B 阶段 plist 约定一致）
 mkdir -p "$LOG_DIR"
 nohup "$DSH_BIN" web --no-open >> "$LOG_DIR/web.log" 2>> "$LOG_DIR/web.err.log" &
 
-# 3) 等就绪（最多 30s）
 for i in $(seq 1 60); do
-  if curl -s -o /dev/null --noproxy '*' --max-time 1 "$URL"; then
-    echo "dsh web 已重启"
+  if app_ready; then
+    echo "dsh web 已重启（手动 nohup，HTTP $(probe_code)）"
     exit 0
   fi
   sleep 0.5
 done
 
-echo "dsh web 重启失败，查看 ~/.dsh/web.err.log" >&2
+echo "dsh web 重启失败，最近错误：" >&2
+tail -20 "$LOG_DIR/web.err.log" >&2
 exit 1

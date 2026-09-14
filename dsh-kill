@@ -1,31 +1,72 @@
 #!/bin/bash
 # dsh-kill：停止 dsh web 服务（dsh-restart 的只停版，不重启）
-# 与 dsh-restart 同一套进程匹配（pkill -f "dsh web"）与端口判据（127.0.0.1:3080）
-# A 阶段：手动停（无 launchd）；B 阶段升级后需先 launchctl 停服务再 kill，防自动拉起
+#
+# 2026-09-14 改造：原版只用 pkill，而服务已由 launchd 托管（ai.dsh.web，
+# KeepAlive=true）——杀掉进程 launchd 会在数秒内原地拉起，pkill 等于没停。
+# 现改为：
+#   launchd 托管 → launchctl bootout（本会话内卸载；**不影响下次登录自动加载**）
+#   未托管 / bootout 失败 → 退回 pkill 逻辑
+#
+# 注：非托管分支的进程匹配从 `pkill -f "dsh web"` 改为匹配真实 argv。
+#     dsh 实际以 `node …/dsh/lib/bin.js --profile web --no-open` 运行，命令行里
+#     并没有连续的 "dsh web" 子串，旧写法一个进程都匹配不到，只会空等 20s 再报
+#     「停止失败」。现按「node + dsh 的 bin.js + --profile web」特征一起匹配。
+#
+# 端口判据仍是 127.0.0.1:3080（返 401 也算在跑，故只判连接性、不看状态码）。
+
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+LABEL="ai.dsh.web"
+DOMAIN="gui/$(id -u)"
 URL="http://127.0.0.1:3080"
 
-# 1) 停：先 SIGTERM，让进程正常退出
-if pkill -f "dsh web" 2>/dev/null; then
+alive() { curl -s -o /dev/null --noproxy '*' --max-time 1 "$URL"; }
+# 真实 argv：node .../@deepseek-ai/dsh/lib/bin.js --profile web --no-open
+PROC_PATTERN='bin\.js.*--profile web'
+
+if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  # --- launchd 托管：bootout ---
+  if launchctl bootout "$DOMAIN/$LABEL"; then
+    echo "dsh web 卸载指令已发出（launchctl bootout），等待停止…"
+
+    for i in $(seq 1 30); do
+      alive || { echo "dsh web 已停止（launchd: bootout，登录前不会自动拉起）"; exit 0; }
+      sleep 0.5
+    done
+
+    echo "bootout 后进程仍未退净，追加强制终止…" >&2
+    pkill -9 -f "$PROC_PATTERN" 2>/dev/null
+    for i in $(seq 1 10); do
+      alive || { echo "dsh web 已停止（强制终止）"; exit 0; }
+      sleep 0.5
+    done
+
+    echo "dsh web 停止失败：端口 3080 仍被占用，查看 $HOME/.dsh/web.err.log" >&2
+    exit 1
+  fi
+  echo "launchctl bootout 失败，退回 pkill 路径…" >&2
+else
+  echo "未检测到 launchd 服务 $LABEL，走 pkill…"
+fi
+
+# --- 未托管 / bootout 失败：pkill 路径 ---
+if pkill -f "$PROC_PATTERN" 2>/dev/null; then
   echo "dsh web 终止信号已发出，等待停止…"
 else
   echo "dsh web 未在运行（无匹配进程）"
 fi
 
-# 2) 等端口释放（至多 15s）
 for i in $(seq 1 30); do
-  curl -s -o /dev/null --noproxy '*' --max-time 1 "$URL" || { echo "dsh web 已停止"; exit 0; }
+  alive || { echo "dsh web 已停止"; exit 0; }
   sleep 0.5
 done
 
-# 3) SIGTERM 未退净：SIGKILL 兜底，再等 5s
 echo "进程未退出，尝试强制终止…" >&2
-pkill -9 -f "dsh web" 2>/dev/null
+pkill -9 -f "$PROC_PATTERN" 2>/dev/null
 for i in $(seq 1 10); do
-  curl -s -o /dev/null --noproxy '*' --max-time 1 "$URL" || { echo "dsh web 已停止（强制终止）"; exit 0; }
+  alive || { echo "dsh web 已停止（强制终止）"; exit 0; }
   sleep 0.5
 done
 
-echo "dsh web 停止失败：端口 3080 仍被占用，查看 ~/.dsh/web.err.log" >&2
+echo "dsh web 停止失败：端口 3080 仍被占用，查看 $HOME/.dsh/web.err.log" >&2
 exit 1
