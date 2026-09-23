@@ -19,6 +19,13 @@
 #
 # 注 4：非托管分支的进程匹配同样从 `pkill -f "dsh web"` 改为匹配真实 argv
 #       （`node …/dsh/lib/bin.js --profile web`），旧写法匹配不到任何进程。
+#
+# 2026-09-23 补：**bootout 后的恢复路径**。dsh-kill 走 launchctl bootout 把服务从
+#   launchd 卸载（本会话内 label 不存在），此时 kickstart 无从下手，原版会静默落到
+#   nohup 手起 —— 服务是起来了，但**脱离了 launchd 托管**（KeepAlive 没了，崩了不再
+#   自动重启），且拖到下次登录才回到正轨。现补一级 bootstrap：label 不存在但 plist
+#   在，先 `launchctl bootstrap` 从文件重新装载（RunAtLoad 会让它当场启动），
+#   只有 bootstrap 也失败才退回 nohup。同源问题见 dsh-kill 与 src/launcher.sh。
 
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -26,6 +33,7 @@ LABEL="ai.dsh.web"
 DOMAIN="gui/$(id -u)"
 URL="http://127.0.0.1:3080"
 LOCK="$HOME/.dsh/.credentials.yaml.lock"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DSH_BIN="$HOME/.npm-global/bin/dsh"
 LOG_DIR="$HOME/.dsh"
 PROC_PATTERN='bin\.js.*--profile web'
@@ -85,7 +93,30 @@ if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
   echo "launchctl kickstart 失败，退回非托管路径…" >&2
 fi
 
-# --- 2) 非托管兜底：nohup 手起 ---
+# --- 2) 服务未装载（典型：刚跑过 dsh-kill）→ 从 plist 重新 bootstrap ---
+#     bootstrap 成功即回到 launchd 托管态（RunAtLoad 让它当场启动），
+#     而不是现在的「静默 nohup 手起、丢掉 KeepAlive」。
+if [ -f "$PLIST" ]; then
+  if launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null; then
+    for i in $(seq 1 60); do
+      if app_ready; then
+        NEW_PID="$(pid_of)"
+        echo "dsh web 已重启（launchd bootstrap 重新装载，pid ${NEW_PID:-?}，HTTP $(probe_code)）"
+        reap_stale_lock "$NEW_PID"
+        exit 0
+      fi
+      sleep 0.5
+    done
+    echo "bootstrap 后 30s 未就绪（launchd），最近错误：" >&2
+    tail -20 "$LOG_DIR/web.err.log" >&2
+    exit 1
+  fi
+  echo "launchctl bootstrap 失败，退回非托管路径…" >&2
+else
+  echo "未找到服务定义 $PLIST，退回非托管路径…" >&2
+fi
+
+# --- 3) 非托管兜底：nohup 手起 ---
 echo "未检测到 launchd 服务 ${LABEL}，退回手动启动…"
 pkill -f "$PROC_PATTERN" 2>/dev/null && sleep 1
 for i in $(seq 1 10); do
