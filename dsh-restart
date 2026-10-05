@@ -2,10 +2,8 @@
 # dsh-restart：重启 dsh web 服务
 #
 # 2026-09-14 改造：原版直接 pkill + nohup 手起，而服务已由 launchd 托管
-# （ai.dsh.web，KeepAlive=true）——pkill 杀掉的进程会被 launchd 立刻拉起，再 nohup
-# 一个手动实例，两边抢 127.0.0.1:3080，形成双实例。现改为：
-#   launchd 托管 → launchctl kickstart -k（原子重启，不产生双实例）
-#   非托管       → 退回原 nohup 逻辑（早期手起场景）
+#（ai.dsh.web，KeepAlive=true）——pkill 杀掉的进程会被 launchd 立刻拉起，再 nohup
+# 一个手动实例，两边抢 127.0.0.1:3080，形成双实例。现改为 launchd 感知。
 #
 # 注 1：launchctl kickstart 在 WorkBuddy 的 shell 里可用（bootstrap 不可用），已实测。
 # 注 2：就绪判据必须看 HTTP 状态码，不能只看「端口有响应」——dsh 半启动态（插件树
@@ -14,127 +12,107 @@
 #       ~/.dsh/.credentials.yaml.lock 一起死，留下失效锁 → 下一实例
 #       「atomic-write: timed out waiting for the writer lock」→ 崩溃循环。
 #       2026-09-14 深夜实踩（web.err.log 有完整栈，launchd runs 计数已到 14 次）。
-#       故重启后核对锁持有者：若不是当前实例，判定为失效锁并自动处理（先备份再删，
-#       因为此刻旧持有者已确定不在运行，留着的唯一后果就是下一次启动继续崩）。
-#
-# 注 4：非托管分支的进程匹配同样从 `pkill -f "dsh web"` 改为匹配真实 argv
-#       （`node …/dsh/lib/bin.js --profile web`），旧写法匹配不到任何进程。
+#       由 dsh-lib.sh 的 reap_stale_lock 处理：判据是「持锁 PID 是否还活着」，
+#       不依赖调用方是否知道旧 PID，故可在任何启动动作前调一次。
 #
 # 2026-09-23 补：**bootout 后的恢复路径**。dsh-kill 走 launchctl bootout 把服务从
 #   launchd 卸载（本会话内 label 不存在），此时 kickstart 无从下手，原版会静默落到
 #   nohup 手起 —— 服务是起来了，但**脱离了 launchd 托管**（KeepAlive 没了，崩了不再
-#   自动重启），且拖到下次登录才回到正轨。现补一级 bootstrap：label 不存在但 plist
-#   在，先 `launchctl bootstrap` 从文件重新装载（RunAtLoad 会让它当场启动），
-#   只有 bootstrap 也失败才退回 nohup。同源问题见 dsh-kill 与 src/launcher.sh。
+#   自动重启），且拖到下次登录才回到正轨。现补一级 bootstrap。
+#
+# 2026-10-05 改造：常量/判据/锁处理抽到 dsh-lib.sh；修两处逻辑缺陷：
+#   ① kickstart 失败后原版不复检 label 是否仍装载，直接往下走到 nohup 分支 ——
+#      若 kickstart 只是瞬时失败而服务其实健康，pkill 会杀掉正在跑的实例，服务从此
+#      脱离 launchd 托管。现在两级都失败后先问 launchd_managed：仍托管就不接管
+#      （明确报错退出），只有确认未托管才兜底。
+#   ② 原第 3 分支的 reap_stale_lock "" 传空串，语义是「无条件删锁」—— 若 pkill 没
+#      匹配到进程、持锁者还活着，就会删掉活进程的锁，让两个实例并发写 credentials。
+#      现在判据统一为 kill -0 探活，删不到活锁。
+set -u
 
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-LABEL="ai.dsh.web"
-DOMAIN="gui/$(id -u)"
-URL="http://127.0.0.1:3080"
-LOCK="$HOME/.dsh/.credentials.yaml.lock"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-DSH_BIN="$HOME/.npm-global/bin/dsh"
-LOG_DIR="$HOME/.dsh"
-PROC_PATTERN='bin\.js.*--profile web'
-
-pid_of()   { launchctl print "$DOMAIN/$LABEL" 2>/dev/null | awk '/pid = /{print $3; exit}'; }
-probe_code() {
-  local c
-  c=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 2 "$URL" 2>/dev/null)
-  printf '%s' "${c:-000}"
-}
-# 健康态：无 token 请求返 401。半启动态返 404、进程死了返 000、5xx 属异常。
-app_ready() {
-  case "$(probe_code)" in
-    000|404|5*) return 1 ;;
-    *)          return 0 ;;
-  esac
-}
-# 锁的持有者不是当前实例 → 失效锁（持有者已死，但锁文件还在）。
-# 只备份 + 删除，不静默吞掉：留着的唯一后果是下一次启动继续崩。
-reap_stale_lock() {
-  local cur="$1"
-  [ -f "$LOCK" ] || return 0
-  local holder; holder="$(cat "$LOCK" 2>/dev/null)"
-  [ "$holder" = "$cur" ] && return 0
-  local bak="$LOG_DIR/backups/.credentials.yaml.lock.stale-$(date +%Y%m%d%H%M%S)"
-  mkdir -p "$LOG_DIR/backups"
-  cp "$LOCK" "$bak" 2>/dev/null
-  if rm -f "$LOCK" 2>/dev/null; then
-    echo "  ⚠ 清掉失效锁 ${LOCK}（持有者 pid ${holder:-?} ≠ 当前实例 ${cur:-?}；备份 ${bak}）" >&2
-  else
-    echo "  ⚠ 失效锁 $LOCK 存在但删不掉（持有者 pid ${holder:-?}），如需手动清理请先备份" >&2
-  fi
-}
+LIB="$HOME/.dsh/lib/dsh-lib.sh"
+if [ ! -f "$LIB" ]; then
+  echo "缺少 $LIB，请重新运行 build.sh" >&2
+  exit 1
+fi
+# shellcheck source=../src/dsh-lib.sh
+. "$LIB"
 
 # --- 1) launchd 托管：kickstart -k ---
-if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-  OLD_PID="$(pid_of)"
+OLD_PID="$(pid_of)"
 
-  # 重启前先处理上一轮遗留的失效锁，避免 kickstart 直接撞进崩溃循环
-  reap_stale_lock "$OLD_PID"
+# 重启动作前清掉上一轮遗留的失效锁，避免 kickstart 直接撞进崩溃循环（注 3）
+reap_stale_lock
 
+if launchd_managed; then
   if launchctl kickstart -k "$DOMAIN/$LABEL"; then
-    # 等「PID 已换 + 应用真就绪」；只看端口会误判（见注 2）
-    for i in $(seq 1 60); do
+    # 等「PID 已换 + 应用真就绪」；只看端口会误判（注 2）
+    for _i in $(seq 1 60); do
       NEW_PID="$(pid_of)"
       if [ -n "$NEW_PID" ] && [ "$NEW_PID" != "$OLD_PID" ] && app_ready; then
-        echo "dsh web 已重启（launchd，pid ${OLD_PID:-?} -> ${NEW_PID}，HTTP $(probe_code)）"
-        reap_stale_lock "$NEW_PID"
+        echo "dsh web 已重启（launchd kickstart，pid ${OLD_PID:-?} -> ${NEW_PID}，HTTP $(probe_code)）"
         exit 0
       fi
       sleep 0.5
     done
-    echo "dsh web 重启超时（launchd），最近错误：" >&2
+    echo "dsh web 重启超时（launchd kickstart），最近错误：" >&2
     tail -20 "$LOG_DIR/web.err.log" >&2
     exit 1
   fi
-  echo "launchctl kickstart 失败，退回非托管路径…" >&2
+  echo "launchctl kickstart 失败，尝试 bootstrap plist…" >&2
 fi
 
 # --- 2) 服务未装载（典型：刚跑过 dsh-kill）→ 从 plist 重新 bootstrap ---
 #     bootstrap 成功即回到 launchd 托管态（RunAtLoad 让它当场启动），
-#     而不是现在的「静默 nohup 手起、丢掉 KeepAlive」。
+#     而不是静默 nohup 手起、丢掉 KeepAlive。
 if [ -f "$PLIST" ]; then
   if launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null; then
-    for i in $(seq 1 60); do
-      if app_ready; then
-        NEW_PID="$(pid_of)"
-        echo "dsh web 已重启（launchd bootstrap 重新装载，pid ${NEW_PID:-?}，HTTP $(probe_code)）"
-        reap_stale_lock "$NEW_PID"
-        exit 0
-      fi
-      sleep 0.5
-    done
+    if CODE="$(wait_ready)"; then
+      echo "dsh web 已重启（launchd bootstrap 重新装载，pid $(pid_of)，HTTP $CODE）"
+      exit 0
+    fi
     echo "bootstrap 后 30s 未就绪（launchd），最近错误：" >&2
     tail -20 "$LOG_DIR/web.err.log" >&2
     exit 1
   fi
-  echo "launchctl bootstrap 失败，退回非托管路径…" >&2
-else
-  echo "未找到服务定义 $PLIST，退回非托管路径…" >&2
+  echo "launchctl bootstrap 失败。" >&2
 fi
 
-# --- 3) 非托管兜底：nohup 手起 ---
-echo "未检测到 launchd 服务 ${LABEL}，退回手动启动…"
+# --- 3) 仍受 launchd 托管 → 不接管 ---
+#     走到这里说明 kickstart 失败但 label 还在（例如 bootout 刚结束时的残留态）。
+#     此时再 pkill + nohup 就是原版那个坑：杀掉健康实例、手起一个脱离 KeepAlive 的
+#     野实例。宁可失败也不主动破坏托管。
+if launchd_managed; then
+  STATE="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null | awk -F'= ' '/state = /{print $2; exit}')"
+  echo "服务仍在 launchd 托管下（state = ${STATE:-?}），但无法重启。" >&2
+  echo "  若确认要重来：dsh-kill（bootout 卸载）→ dsh-restart（bootstrap 装载）。" >&2
+  echo "  最近错误：" >&2
+  tail -20 "$LOG_DIR/web.err.log" >&2
+  exit 1
+fi
+
+# --- 4) 确认未托管（非托管 / 没装 launchd 服务）→ nohup 兜底 ---
+if [ ! -x "$DSH_BIN" ]; then
+  echo "未检测到 launchd 服务 ${LABEL}，且未找到 dsh（${DSH_BIN}）" >&2
+  exit 1
+fi
+echo "未检测到 launchd 服务 ${LABEL}，退回手动启动…" >&2
 pkill -f "$PROC_PATTERN" 2>/dev/null && sleep 1
-for i in $(seq 1 10); do
+for _i in $(seq 1 10); do
   app_ready || break
   sleep 0.5
 done
-reap_stale_lock ""
+reap_stale_lock
 
 mkdir -p "$LOG_DIR"
 nohup "$DSH_BIN" web --no-open >> "$LOG_DIR/web.log" 2>> "$LOG_DIR/web.err.log" &
 
-for i in $(seq 1 60); do
-  if app_ready; then
-    echo "dsh web 已重启（手动 nohup，HTTP $(probe_code)）"
-    exit 0
-  fi
-  sleep 0.5
-done
+if CODE="$(wait_ready)"; then
+  echo "dsh web 已重启（手动 nohup，HTTP $CODE）"
+  exit 0
+fi
 
 echo "dsh web 重启失败，最近错误：" >&2
 tail -20 "$LOG_DIR/web.err.log" >&2

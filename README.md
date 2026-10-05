@@ -20,6 +20,17 @@ DSH Web GUI 的纯 UI 桌面壳：Edge `--app` 独立窗口 + launchd 服务常�
   - `dsh-restart`：同样先 `bootstrap` 再考虑 nohup（原版会静默 nohup 手起，把服务**拖离 launchd 托管**、丢掉 KeepAlive，直到下次登录才回正轨）
   - **关键实据**：`launchctl bootstrap` 在 WorkBuddy 派生的 shell 里必报 `5: Input/output error`（沙箱限制），但 **.app 由 LaunchServices 拉起、不在该沙箱内，实测可用**（2026-09-23：`open ~/Applications/dsh.app` → 8s 后 HTTP 401、`launchctl print` 显示 `state = running`）
   - 附带修正：`launchctl bootout` 刚返回的一瞬 `launchctl print` 仍可能返回成功（残留状态），故两级兜底写成**顺序 if** 而非 `if/elif`
+- **2026-10-05 改造**：抽 `src/dsh-lib.sh` 共享库 + 修5 处逻辑缺陷
+  - **共享库**：`LABEL/DOMAIN/URL/PROC_PATTERN/probe_code/app_ready/pid_of/reap_stale_lock/launchd_start/wait_ready` 三脚本共用（装到 `~/.dsh/lib/dsh-lib.sh`）。起因是同一个坑只修了两个脚本——`launcher.sh` 从来没有 `reap_stale_lock`
+  - **`launcher.sh` 补失效锁清理**：开机后 launchd 拉起服务要加载插件树（10–30s），此窗口内双击图标 → probe 返 `000` → 被判「没跑」→ `kickstart -k` **强杀半启动实例** → 留下 credentials writer lock → 后续崩溃循环
+  - **`dsh-restart` 不再误杀托管中的实例**：kickstart 瞬时失败时原版会一路走到 nohup 分支，pkill 掉健康的实例、手起一个脱离 KeepAlive 的野实例。现在两级都失败后先问`launchd_managed`，仍托管就报错退出、不接管
+  - **`reap_stale_lock` 判据换成 `kill -0` 探活**：原 `reap_stale_lock ""`（空串）语义是「无条件删锁」，若 pkill 没匹配到、持锁者还活着就会删掉活锁，让两实例并发写 credentials
+  - **`build.sh` 死代码**：`if plist 无变化 → 跳过` 在前，导致「plist 没变 + 服务被 bootout 卸载」被直接吃掉（刚跑完 dsh-kill 再 build.sh 什么也不发生），下面的「未装载就 bootstrap」分支从未执行过。现改为**先判服务是否装载**
+  - **`build.sh` 先装后换**：原来先 `mv` 旧 .app 进废纸篓再组装，中途失败会留下「已拆掉、没装回来」的空档。现先在 `build/dsh.app.new` 组装好再换
+  - **`build.sh` 从 `command -v dsh` 反解真实路径**（`realpathSync` 跟软链），不再写死 `.npm-global/lib/node_modules/...`；npm prefix 一变时不会装出起不来的 plist
+  - **备份统一到 `~/.dsh/backups/build/`**并只留最近 5 份；旧版把备份丢在 `~/.npm-global/bin/*.bak-*`（污染 PATH 目录，已积 6 份）和 `LaunchAgents/*.plist.bak-*`
+  - token 正则放宽到非空白/引号/`&`（窄集合会匹配出被截断的无效 token）
+  - lib 自检：`bash src/dsh-lib.sh`（断言空响应兜底 000、无服务不判就绪、空锁不误删、死 pid 锁会清、活 pid 锁不删）
 - **起草**：热巴（需求调研 + 方案设计 + 环境核查）
 
 ## 架构（三层职责分离）
@@ -41,24 +52,29 @@ Edge --app 窗口（UI 层） —— 纯渲染，不管进程；兼容性零风�
 ```
 src/
 ├── launcher.sh                    ← .app 启动入口
+├── dsh-lib.sh                     ← 三脚本共享库（装到 ~/.dsh/lib/，自带自检）
 └── ai.dsh.web.plist               ← launchd 服务定义（模板，build.sh 渲染 @NODE@/@DSH@/@HOME@）
-build.sh                           ← 组装 .app → ~/Applications + 装 launchd + 装 PATH 命令
+build.sh                ← 组装 .app → ~/Applications + 装 launchd + 装 PATH 命令
 dsh-restart                        ← 重启服务（launchd: kickstart -k）
 dsh-kill                           ← 只停服务（launchd: bootout）
 assets/icon_1024.png               ← 应用图标源图
 docs/                              ← 单位电脑复刻手册等
 ```
 
-安装产物位置（Jimmy 已确认的布局约定）：源码进 `~/dev`，构建产物才进 `~/Applications`。
+> **改任何一处共享逻辑，只改 `src/dsh-lib.sh`**——label、就绪判据、失效锁、启动兜底
+> 都在这里。三个脚本 source 它，所以不会再出现「同一个坑只修了两个脚本」。
 
 ## 常用命令
 
 ```bash
 dsh-restart        # 插件更新后重启服务（等 PID 换 + HTTP 就绪，最多 30s）
 dsh-kill           # 停服务（launchd bootout；下次登录仍会自启）
+bash src/dsh-lib.sh    # 共享库自检（不碰线上服务）
 launchctl print gui/$(id -u)/ai.dsh.web      # 查服务状态
 tail -20 ~/.dsh/web.err.log                  # 启动失败看这里
 ```
+
+安装产物位置（Jimmy 已确认的布局约定）：源码进 `~/dev`，构建产物才进 `~/Applications`。
 
 **跑过 `dsh-kill` 后想恢复**：双击 `~/Applications/dsh.app`（launcher 会从 plist 重新 bootstrap），或跑 `dsh-restart`。两条路都会回到 launchd 托管态。
 
