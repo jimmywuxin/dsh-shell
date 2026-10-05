@@ -45,8 +45,10 @@ probe_code() {
 
 # 就绪判据：401/2xx/3xx 算就绪；000（没起）/404（半启动，插件树没加载完照样
 # bind 3080）/5xx 不算。只看端口连通性会误报 —— 2026-09-14 实踩。
+# $1 可选：调用方已经 probe 过就把它传进来，省一次请求。
+# 判据只此一处 —— launcher.sh 的 ready_or_open 曾把它抄了一份（2026-10-06 收回）。
 app_ready() {
-  case "$(probe_code)" in
+  case "${1:-$(probe_code)}" in
     000|404|5*) return 1 ;;
     *)          return 0 ;;
   esac
@@ -55,7 +57,7 @@ app_ready() {
 pid_of() { launchctl print "$DOMAIN/$LABEL" 2>/dev/null | awk '/pid = /{print $3; exit}'; }
 
 # 失效锁清理。判据是「持锁 PID 是否还活着」（kill -0），因此与调用方无关、
-# 幂等、可在任意启动动作前调一次：实例活着时锁有效→保留；持锁进程已死→备份后删除。
+# 幂等、可在任意启动动作前调一次：实例活着时锁有效→保留；持锁进程已死→删除。
 # 删的理由：留着锁的唯一后果是下一次启动继续崩在 writer lock 超时上。
 reap_stale_lock() {
   [ -f "$LOCK" ] || return 0
@@ -65,27 +67,10 @@ reap_stale_lock() {
     ''|*[!0-9]*) return 0 ;;   # 空/非 pid：看不懂就不动，交人工
   esac
   kill -0 "$holder" 2>/dev/null && return 0
-  mkdir -p "$LOG_DIR/backups"
-  cp "$LOCK" "$LOG_DIR/backups/.credentials.yaml.lock.stale-$(date +%Y%m%d%H%M%S)"
-  if rm -f "$LOCK"; then
-    echo "  ⚠ 清掉失效锁（持锁 pid ${holder} 已死，已备份到 $LOG_DIR/backups/）" >&2
-  else
-    echo "  ⚠ 失效锁 $LOCK 删不掉（持锁 pid ${holder}），请手动备份后清理" >&2
-  fi
-}
-
-# 两级启动兜底，成功时输出状态名（kickstart / bootstrap），都不通则返回 1。
-# 必须是**顺序 if**而非 if/elif：launchctl bootout 刚返回的一瞬，launchctl print
-# 仍可能返回成功（残留态假阳性，09-23 实测），此时 kickstart 会失败——写成 elif
-# 就再也不会尝试 bootstrap，白白掉进 nohup 兜底、服务脱离 launchd 托管。
-launchd_start() {
-  if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-    launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null 2>&1 && { echo kickstart; return 0; }
-  fi
-  if [ -f "$PLIST" ]; then
-    launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1 && { echo bootstrap; return 0; }
-  fi
-  return 1
+  # 锁里只有一个 pid，没什么可备份的（曾经每次都往 backups/ 拷一份，纯堆积）。
+  rm -f "$LOCK" \
+    && echo "  ⚠ 清掉失效锁（持锁 pid ${holder} 已死）" >&2 \
+    || echo "  ⚠ 失效锁 $LOCK 删不掉（持锁 pid ${holder}），请手动清理" >&2
 }
 
 # label 是否仍受launchd 托管（kickstart/bootstrap 都失败后的关键判据）。
@@ -102,13 +87,12 @@ wait_ready() {
 }
 
 # 自检：`bash ~/.dsh/lib/dsh-lib.sh`。只断言最易回归的三处判据。
-# 不测 launchd_start —— 它会真 kickstart/bootout 线上服务。
 dsh_lib_selftest() {
   local fail=0 tmp
   tmp="$(mktemp -d)"
   # 在**子 shell** 里覆盖 URL/LOG_DIR/LOCK：这三个是本库的全局量，直接赋值会污染
-  # 调用方（万一有人 source 进来跑自检，就会把线上配置改掉，reap_stale_lock 还会
-  # 真的去建 $LOG_DIR/backups 目录）。子 shell 退出后改动自动消失。
+  # 调用方（万一有人 source 进来跑自检，就会把线上配置改掉）。子 shell 退出后改动
+  # 自动消失。
   (
     LOG_DIR="$tmp"
     LOCK="$tmp/lock"

@@ -21,7 +21,7 @@ DSH Web GUI 的纯 UI 桌面壳：Edge `--app` 独立窗口 + launchd 服务常�
   - **关键实据**：`launchctl bootstrap` 在 WorkBuddy 派生的 shell 里必报 `5: Input/output error`（沙箱限制），但 **.app 由 LaunchServices 拉起、不在该沙箱内，实测可用**（2026-09-23：`open ~/Applications/dsh.app` → 8s 后 HTTP 401、`launchctl print` 显示 `state = running`）
   - 附带修正：`launchctl bootout` 刚返回的一瞬 `launchctl print` 仍可能返回成功（残留状态），故两级兜底写成**顺序 if** 而非 `if/elif`
 - **2026-10-05 改造**：抽 `src/dsh-lib.sh` 共享库 + 修5 处逻辑缺陷
-  - **共享库**：`LABEL/DOMAIN/URL/PROC_PATTERN/probe_code/app_ready/pid_of/reap_stale_lock/launchd_start/wait_ready` 三脚本共用（装到 `~/.dsh/lib/dsh-lib.sh`）。起因是同一个坑只修了两个脚本——`launcher.sh` 从来没有 `reap_stale_lock`
+  - **共享库**：`LABEL/DOMAIN/URL/LOG_DIR/LOCK/PLIST/DSH_BIN/PROC_PATTERN/probe_code/app_ready/pid_of/reap_stale_lock/launchd_managed/wait_ready` 三脚本共用（装到 `~/.dsh/lib/dsh-lib.sh`）。起因是同一个坑只修了两个脚本——`launcher.sh` 从来没有 `reap_stale_lock`。**常量与判据必须进库；流程不要**——`launchd_start`（kickstart→bootstrap 两级兜底）原先也在库里，但它只有 `launcher.sh` 一个调用方，而 `dsh-restart` 把同一条序列自己写了一遍，为单调用方的抽象留两份拷贝不划算，2026-10-06 搬回 `launcher.sh`
   - **`launcher.sh` 补失效锁清理**：开机后 launchd 拉起服务要加载插件树（10–30s），此窗口内双击图标 → probe 返 `000` → 被判「没跑」→ `kickstart -k` **强杀半启动实例** → 留下 credentials writer lock → 后续崩溃循环
   - **`dsh-restart` 不再误杀托管中的实例**：kickstart 瞬时失败时原版会一路走到 nohup 分支，pkill 掉健康的实例、手起一个脱离 KeepAlive 的野实例。现在两级都失败后先问`launchd_managed`，仍托管就报错退出、不接管
   - **`reap_stale_lock` 判据换成 `kill -0` 探活**：原 `reap_stale_lock ""`（空串）语义是「无条件删锁」，若 pkill 没匹配到、持锁者还活着就会删掉活锁，让两实例并发写 credentials

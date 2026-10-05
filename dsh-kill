@@ -40,6 +40,17 @@ dsh_pids() { pgrep -f "$PROC_PATTERN" 2>/dev/null; }
 # 停了 = 匹配进程已无（强杀后仍可能短暂在，pgrep 空为准）+ 端口已释放。
 stopped() { [ -z "$(dsh_pids)" ] && ! alive; }
 
+# 轮询到停：$1=轮数（每轮 0.5s），$2=完成话术。
+# 2026-10-06：这段循环原本在下面出现了 4 次（bootout / 强杀 / pkill / 再强杀）。
+wait_stop() {
+  local n="$1" i
+  for ((i = 0; i < n; i++)); do
+    stopped && finish "$2"
+    sleep 0.5
+  done
+  return 0
+}
+
 finish() {
   reap_stale_lock
   echo "dsh web 已停止（$1；恢复用 dsh-restart 或双击 dsh.app）"
@@ -50,16 +61,10 @@ if launchd_managed; then
   # --- launchd 托管：bootout ---
   if launchctl bootout "$DOMAIN/$LABEL"; then
     echo "dsh web 卸载指令已发出（launchctl bootout），等待停止…"
-    for _i in $(seq 1 30); do
-      stopped && finish "launchd: bootout —— 服务已从 launchd 卸载，本会话内不会自启"
-      sleep 0.5
-    done
+    wait_stop 30 "launchd: bootout —— 服务已从 launchd 卸载，本会话内不会自启"
     echo "bootout 后进程仍未退净，追加强制终止…" >&2
     pkill -9 -f "$PROC_PATTERN" 2>/dev/null
-    for _i in $(seq 1 10); do
-      stopped && finish "强制终止"
-      sleep 0.5
-    done
+    wait_stop 10 "强制终止"
     echo "dsh web 停止失败：进程仍在（$(dsh_pids | tr '\n' ' ')），或端口 3080 被其他进程占用（$(lsof -nP -iTCP:3080 -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | sort -u | tr '\n' ' ')）。查看 $HOME/.dsh/web.err.log" >&2
     exit 1
   fi
@@ -75,17 +80,11 @@ else
   echo "dsh web 未在运行（无匹配进程）"
 fi
 
-for _i in $(seq 1 30); do
-  stopped && finish "已停止"
-  sleep 0.5
-done
+wait_stop 30 "已停止"
 
 echo "进程未退出，尝试强制终止…" >&2
 pkill -9 -f "$PROC_PATTERN" 2>/dev/null
-for _i in $(seq 1 10); do
-  stopped && finish "强制终止"
-  sleep 0.5
-done
+wait_stop 10 "强制终止"
 
 echo "dsh web 停止失败：进程仍在（$(dsh_pids | tr '\n' ' ')），或端口 3080 被其他进程占用。查看 $HOME/.dsh/web.err.log" >&2
 exit 1

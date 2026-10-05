@@ -55,10 +55,9 @@ BROWSER_PROFILE="$HOME/.dsh/edge-profile"
 notify() { osascript -e "display notification \"$1\" with title \"DSH\"" >/dev/null 2>&1; }
 
 # 前置保护：缺件直接提示，不傻等 30s
-if ! command -v node >/dev/null 2>&1; then
-  notify "未找到 node，无法启动 dsh web"
-  exit 1
-fi
+# （曾在这里查 node —— 2026-10-06 删掉：开窗路径一个 node 都不用，它只会在「服务
+#  好好在跑、但 node 被卸载/挪走」时拦住开窗；真正需要 node 的 nohup 兜底在下面
+#  查 $DSH_BIN。PATH 仍需 dsh-lib.sh 补，为的是那个兜底能跑起来。）
 if [ ! -x "$BROWSER" ]; then
   notify "未找到 Microsoft Edge，无法打开窗口"
   exit 1
@@ -162,9 +161,7 @@ disable_browser_translate() {
 ready_or_open() {
   local code
   code="$(probe_code)"
-  case "$code" in
-    000|404|5*) return 1 ;;
-  esac
+  app_ready "$code" || return 1   # 判据在 dsh-lib.sh，这里只取一次状态码
   if [ "$code" = "401" ]; then
     local u
     if u="$(token_url)"; then open_window "$u"; fi
@@ -178,7 +175,19 @@ if ready_or_open; then :; fi
 # 2) 服务没跑 → 先清可能存在的失效锁（关键：见文件头2026-10-05），再交给 launchd
 #    拉起。不自己 nohup，防双实例。
 reap_stale_lock
-STARTED="$(launchd_start)" || STARTED=""
+# 两级兜底（2026-10-06：原为 dsh-lib.sh 的 launchd_start()，但它只有本脚本一个调用方，
+# 而 dsh-restart 把同一条序列自己写了一遍——为一个单调用方的抽象留两份拷贝不划算，
+# 搬回本文件，dsh-restart 那份不动）。记下走到哪一级，只为最后的报错话术。
+# 必须是**顺序 if**而非 if/elif：bootout 刚返回的一瞬 launchctl print 仍可能返成功
+# （残留态假阳性，09-23 实测），此时 kickstart 会失败——写成 elif 就再也不会试
+# bootstrap，白白掉进 nohup 兜底、服务脱离 launchd 托管。
+STARTED=""
+if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null 2>&1 && STARTED=kickstart
+fi
+if [ -z "$STARTED" ] && [ -f "$PLIST" ]; then
+  launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1 && STARTED=bootstrap
+fi
 
 if [ -z "$STARTED" ]; then
   # c) 兜底：launchd 两条路都不通 → 手动起一个，保证图标永远能用

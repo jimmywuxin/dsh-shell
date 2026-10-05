@@ -2,6 +2,41 @@
 
 本项目的版本号按**功能里程碑**给，不按 commit 数给。修 bug 不升版本号。
 
+## v1.0.1 — 2026-10-06
+
+过设计审查（ponytail）后的维护版：6 处删减 + 1 处抽象回收，**功能与行为等价**，
+无新功能（按本文档开头的约定，这类改动本不升版本号；因需独立归档改动集而发 patch 版）。
+
+### 改动
+
+- **就绪判据收回一处**：`app_ready` 改为接受可选状态码 `${1:-$(probe_code)}`，
+  `launcher.sh` 的 `ready_or_open` 不再自己抄一份 `000|404|5*`
+- **`launchd_start()` 删除、兜底内联回 `launcher.sh`**：它只有 launcher 一个调用方，
+  而 `dsh-restart` 把同一条 kickstart→bootstrap 序列自己写了一份 —— 为单调用方的
+  抽象留两份拷贝，正是本项目「同一个坑只修了两个脚本」的历史形状。定下的原则：
+  **进共享库的是常量与判据，流程不进**
+- **`build.sh` 的 node 候选**：25 行「按版本号 `sort -V` 取最高」→ 按序取第一个可执行。
+  本机只装了一个 node，择优是投机性通用，还多一个 `sort -V` 的翻车面
+- **`launcher.sh` 删掉开窗前的 `command -v node` 检查**：开窗路径一个 node 都不用，
+  它只会在「服务好好在跑、但 node 被挪走」时拦住开窗。真正需要 node 的 nohup 兜底
+  另有 `$DSH_BIN` 检查
+- **`reap_stale_lock` 不再备份锁文件**：锁里只有一个 pid，没有可恢复的内容，而
+  `backups/` 目录会无限堆积（`prune_backups` 也不管那个目录）
+- **`dsh-kill` 的 4 段同款轮询循环**收成 `wait_stop <轮数> <话术>`
+- **`release.sh` 去掉 `/tmp` 中转文件**：改 `gh release create --notes`（gh 2.93 已支持）
+
+### 验证
+
+- 6 个脚本 `bash -n` 全过；`bash ~/.dsh/lib/dsh-lib.sh` 自检 OK
+- **`launchd_start` 内联版 vs 改动前版本用假 `launchctl` 跑 7 格决策表对拍**，
+  逐格输出相同，含最关键的「`print` 成功但 `kickstart` 失败 → 仍会去试 `bootstrap`」
+- `reap_stale_lock` 实测不再创建 `backups/` 目录；`build.sh` 的 node 选择块抽出实跑，
+  选中路径与现网 plist 一致 → **部署时 plist 逐字节未变，服务未重启**
+
+### 规模
+
+857 → 838 行；代码行（去注释/空行）491 → 465。
+
 ## v1.0.0 — 2026-10-05
 
 首个可用版本。DSH Web GUI 的桌面壳：Edge `--app` 独立窗口 + launchd 服务常驻。

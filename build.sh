@@ -47,35 +47,26 @@ prune_backups() { # $1=文件名
 #   node 选择：**只用本机独立安装的node，排除 WorkBuddy 内置的**。
 #   ~/.workbuddy/binaries/node/... 随 WorkBuddy 自身升级/清理而变动，且在本 shell 里
 #   PATH 前置，`command -v node` 只会命中它 —— 常驻服务不该依赖另一个 App 的内部目录。
-#   候选：~/.local/bin、Homebrew、/usr/local，外加 PATH 里非 WorkBuddy 的 node；
-#   取版本号最高者。launchd 不读 shell 的 PATH，故必须绝对路径。
-# 注：此处不用 `case ... in */x/*)` 也不把整个循环塞进$( )——macOS 自带 bash 3.2
-#     解析 `$( )` 内的 case 模式会误判结尾括号（本次实测报 syntax error）。
-NODE_CANDS=""
-for c in "$HOME/.local/bin/node" /opt/homebrew/bin/node /usr/local/bin/node; do
-  if [ -x "$c" ]; then NODE_CANDS="$NODE_CANDS$c"$'\n'; fi
-done
-PATH_NODE="$(command -v node 2>/dev/null || true)"
-if [ -n "$PATH_NODE" ] && [ "${PATH_NODE#*/.workbuddy/}" = "$PATH_NODE" ]; then
-  NODE_CANDS="$NODE_CANDS$PATH_NODE"$'\n'
-fi
-
+#   候选：~/.local/bin、Homebrew、/usr/local，外加 PATH 里非 WorkBuddy 的 node。
+#   **按顺序取第一个可用的**（2026-10-06：原版在候选里按版本号取最高，25 行；本机
+#   只装了一个 node，择优是投机性通用，且多一套 sort -V 就有翻车面）。launchd 不读
+#   shell 的 PATH，故必须绝对路径。
 NODE_BIN=""
-NODE_VER=""
-for c in $NODE_CANDS; do
-  v="$("$c" --version 2>/dev/null | sed 's/^v//')"
-  if [ -n "$v" ]; then
-    if [ -z "$NODE_VER" ] || [ "$(printf '%s\n%s\n' "$NODE_VER" "$v" | sort -V | tail -1)" = "$v" ]; then
-      NODE_VER="$v"; NODE_BIN="$c"
-    fi
-  fi
+for c in "$HOME/.local/bin/node" /opt/homebrew/bin/node /usr/local/bin/node; do
+  [ -x "$c" ] && { NODE_BIN="$c"; break; }
 done
 if [ -z "$NODE_BIN" ]; then
+  PATH_NODE="$(command -v node 2>/dev/null || true)"
+  if [ -n "$PATH_NODE" ] && [ "${PATH_NODE#*/.workbuddy/}" = "$PATH_NODE" ]; then
+    NODE_BIN="$PATH_NODE"
+  fi
+fi
+if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   echo "错误：本机没有独立安装的 node（已排除 WorkBuddy 内置的），无法渲染 plist。" >&2
   echo "  请先装 node：brew install node，或从 https://nodejs.org 解压到 ~/.local" >&2
   exit 1
 fi
-echo "node: $NODE_BIN (v$NODE_VER)"
+echo "node: $NODE_BIN (v$("$NODE_BIN" --version | sed 's/^v//'))"
 
 # dsh 入口从 `command -v dsh` 的软链**反解**真实路径，而不是写死
 # $HOME/.npm-global/lib/node_modules/... —— npm prefix 一变（nvm / corepack /

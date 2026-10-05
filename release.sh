@@ -40,7 +40,6 @@ if [ -z "$NOTES" ]; then
     f { print }' CHANGELOG.md)"
   [ -n "$NOTES" ] || { echo "错误：CHANGELOG.md 里没有 $VERSION 段落，也没传 notes" >&2; exit 1; }
 fi
-printf '%s\n' "$NOTES" > /tmp/dsh-release-notes.md
 
 # 3) push main **在打 tag 之前**（反了就又是一次 tag 指向未推送 commit）
 git push origin main
@@ -56,8 +55,7 @@ if ! command -v gh >/dev/null 2>&1; then
   echo "警告：没有 gh（GitHub CLI），tag 已推但 Release 未创建。装：brew install gh" >&2
   exit 1
 fi
-gh release create "$VERSION" --title "$TITLE" --notes-file /tmp/dsh-release-notes.md
-rm -f /tmp/dsh-release-notes.md
+gh release create "$VERSION" --title "$TITLE" --notes "$NOTES"
 
 # 6) 强制复核：远端 main / 远端 tag / 本地 HEAD 必须是同一个 commit
 REMOTE_MAIN="$(git ls-remote origin refs/heads/main | cut -f1)"
