@@ -83,50 +83,46 @@ open_window() {
   mkdir -p "$BROWSER_PROFILE"
   reap_zombie_browser
   disable_browser_translate
-  # **不能用 exec**（2026-10-05 换Chrome 后才暴露的真根因，之前误判成 bundle id
-  # 和 Chromium 单实例两个原因，都不对）。
-  # exec 把 dsh.app 这个进程**原地替换**成浏览器进程，pid 不变。于是 macOS
-  # LaunchServices 认为「dsh.app 还在运行」→ 第二次点 app 时它只做 activate
-  # 已有进程，**launcher 根本不重跑** → 浏览器收到的是上一轮那个 URL/首页，
-  # 用户看到的就是「浏览器默认界面」。
-  # 实测证据：关窗后再点 app，浏览器命令行里--app=... 明明带着，却显示
-  # Google 首页；且主进程 ppid 已退出（被 init 收养）= 确实是 exec 顶替的。
+  # 启动方式：**回到 exec**（2026-10-06 改，nohup+disown 版是错的）。
   #
-  # 也不能只写 `"$BROWSER" ... &` + exit 0（试过）：launcher 一退出，shell 就给
-  # 后台 job 发 SIGHUP 把它连带杀掉 → 窗口一闪而过然后崩（Jimmy 实测反馈）。
-  # nohup 让 Chrome 忽略 SIGHUP，于是它能活过 launcher 的退出；
-  # Chrome 自己会 fork 出浏览器主进程并脱离父进程组，本进程退出不影响它。
-  # disown 再补一刀：把 job 从 shell 的作业表摘掉，退出时连 SIGHUP 都不发。
-  nohup "$BROWSER" --user-data-dir="$BROWSER_PROFILE" --app="$1" >/dev/null 2>&1 &
-  disown 2>/dev/null || true
-  exit 0
+  # 改回 exec 的原因（实测）：`nohup ... &` + disown 让浏览器活过了 launcher 的
+  # 退出，但代价是**它成了孤儿子进程**（ppid = /sbin/launchd，Jimmy 双击后实测）。
+  # macOS 上 Chromium 对孤儿子进程的 `--app` 窗口有约束 —— 进程活着、命令行带着
+  # --app，但**一个窗口都不开**（renderer=0、无 Crashpad 记录 = 不是崩，是不开窗）。
+  # exec 出的进程 ppid 是 LaunchServices，窗口正常。
+  #
+  # exec 曾被认为会导致「第二次点 app 不重跑 launcher」（因为进程被顶替、
+  # LaunchServices 认为 app 还在运行）—— 这条观察本身没错，但解法不该是换启动方式，
+  # 而是在**下次启动前把上次的残留清掉**：reap_zombie_browser 干的就是这件事
+  # （renderer=0 判空壳 → pkill）。两者结合 = 窗口能开 + 每次点 app 都重跑。
+  exec "$BROWSER" --user-data-dir="$BROWSER_PROFILE" --app="$1"
 }
 
-# 清掉「关窗后的浏览器空壳」。
-# 现象（2026-10-05 在 Edge 上实测复现）：关掉 dsh 窗口后，浏览器进程**不会退出**（macOS
-# 上 Chromium 常驻），于是第二次点 app 时，新起的进程发现「同 profile 已有实例」→
-# 把自己降级成URL 转发器，**完全忽略新命令行里的 --app**。结果：URL 被送给一个
-# 已经没有窗口的旧实例，**一个窗口都不开**（renderer 数 = 0 实测），用户看到的就是
-# 「浏览器默认界面」而不是 dsh web。
-# Chromium 单实例靠 profile 目录里的 SingletonLock 软链实现（Edge 上实测
-# `SingletonLock -> Mac-8208`），所以换浏览器也躲不掉，只能自己清。
-# 判据：主进程还在（pgrep 命中且无 --type= 子进程标记）但 renderer 数为 0 → 正是这个
-# 空壳状态。只在这种情况下 kill；有窗口时绝不碰（否则会把正在用的窗口杀掉）。
-# pgrep -f 而不是 `ps | grep`：后者在这台机器上匹配不到（多次实测返回 0）。
+# 清掉上一次的 dsh 浏览器实例 —— **无论有没有窗口，都清**。
+#
+# 为什么必须无条件清（2026-10-06 修正）：
+#   open_window 用 `exec`，所以 dsh.app 的进程会被浏览器进程顶替，ppid 是
+#   LaunchServices。这带来两个连锁问题：
+#     ① 进程被顶替后 LaunchServices 认为「dsh.app 还在运行」→ 第二次点 app 只
+#        activate 已有进程、**launcher 不重跑** → 用户看到「浏览器默认界面」；
+#     ② 单实例机制下新进程只送 URL 不执行 --app。
+#   既然「不清残留 → launcher 不重跑」，那就**每次点 app 都在 exec 前清干净**，
+#   让每一次点击都是「从零起一个带 --app 的新实例」。这与用户预期一致：
+#   点 app = 开一个新窗口。代价：连着点两次会有两个窗口（旧的不保留），可接受。
+#
+# 判据与坑（都实测过）：
+#   - pgrep -f 而不是 `ps | grep`：后者在这台机器上匹配不到（多次实测返 0）。
+#   - pkill 后要轮询等一下：SingletonLock 软链与 socket 的清理有延迟，
+#     立刻重启会被旧锁判成「已有实例」→ 又变成不开窗。
 reap_zombie_browser() {
-  local running renderers
-  running="$(pgrep -f "user-data-dir=$BROWSER_PROFILE" 2>/dev/null | head -1)"
-  [ -n "$running" ] || return 0
-  # 判据只看 renderer 数 —— **有窗口 = 有 renderer 进程**。
-  # 踩过的坑：原先写成「命令行里有 --type= 子进程标记就算有窗口」，但 gpu /
-  # network / utility 这些子进程**关窗后依然存在**，只有 renderer 会跟着窗口一起
-  # 消失。于是 Edge 处在「gpu+utility 在、renderer=0」这个真正的空壳状态时，函数
-  # 判成「有窗口」直接 return，空壳永远清不掉 → 第二次点 app 开不出窗口。
-  # 只在 renderer=0（确无窗口）时 kill；有窗口时绝不碰。
-  renderers="$(pgrep -lf "user-data-dir=$BROWSER_PROFILE" 2>/dev/null | grep -c -- '--type=renderer')"
-  [ "$renderers" -eq 0 ] || return 0
+  pgrep -f "user-data-dir=$BROWSER_PROFILE" >/dev/null 2>&1 || return 0
   pkill -f "user-data-dir=$BROWSER_PROFILE" 2>/dev/null
-  sleep 1
+  local i
+  for i in $(seq 1 10); do
+    pgrep -f "user-data-dir=$BROWSER_PROFILE" >/dev/null 2>&1 || return 0
+    sleep 0.3
+  done
+  return 0
 }
 
 # 关掉浏览器的「是否翻译此页面」气泡。
