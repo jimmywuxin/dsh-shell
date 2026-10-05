@@ -79,7 +79,14 @@ token_url() {
 
 open_window() {
   mkdir -p "$EDGE_PROFILE"
-  exec "$EDGE" --user-data-dir="$EDGE_PROFILE" --app="$1"
+  # --disable-features=Translate：dsh 的 Web UI 是英文，而本机界面语言是 zh-CN，
+  # 独立 profile 每次新建都「从未翻译过」，于是每次开窗都弹「是否翻译此页面」。
+  # 走命令行开关而不是写 profile 的 pref：开关跟着进程走，profile 随手删了重建都有效
+  #（pref 得重写，Edge 退出时还会拿内存里的值覆盖回去）。
+  # 查过 Edge 154 的内核**没有** --no-translate 这个开关（grep 过二进制，对照
+  # --no-first-run / --no-default-browser-check 都在），所以只能走 disable-features。
+  # 只关翻译，不影响 dsh 本身（dsh 的界面语言是应用内自己的，不靠 Edge 翻译）。
+  exec "$EDGE" --user-data-dir="$EDGE_PROFILE" --disable-features=Translate --app="$1"
 }
 
 # 就绪则开窗口并 exec（进程替换，函数不返回）；未就绪返回 1。
