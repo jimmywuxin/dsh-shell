@@ -39,21 +39,18 @@ fi
 # shellcheck source=../src/dsh-lib.sh
 . "$LIB"
 
-# 浏览器壳。**2026-10-05 从 Edge 换成 Chrome**，因为 Edge 与日常浏览共用 bundle id
-# （都是 com.microsoft.edgemac），导致两个实例在 macOS 眼里是同一个 app：
-#   - AppleScript 分不清两者，`activate` 会把日常 Edge 一起提到前台；
-#   - 没法只把 dsh 窗口切到最前 → 点 app 后视线落在日常 Edge 的新标签页上。
-# Chrome 的 bundle id 是 com.google.Chrome，独立，能精确 activate。这是换浏览器的
-# 唯一理由（功能上两者都支持 --app / --user-data-dir）。
-# 顺带：Safari 曾被考虑过，实测否掉—— 无 --app（窗口带地址栏）、无
-# --user-data-dir（cookie 直接进日常 profile）、且 AppleScript 控制要-10004
-# 自动化授权。
-BROWSER="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-# 独立 profile。dsh 的认证是自持的（10-05 实测）：GET /?token=xxx → 303 种下
+# 浏览器壳 = Microsoft Edge。
+# 曾试过换 Chrome（2026-10-05，commit 4147ae1），**结论是换不回来**：
+# Chrome 154跑dsh web 页面时 renderer 会崩（Aw Snap 错误码 10/15，Chrome 弹
+# 「上次打开时意外退出」），重启电脑无效。Edge 154 跑同一页面一直正常。
+# Safari 更早也试过，实测否掉：无 --app（窗口带地址栏）、无 --user-data-dir
+# （cookie 直接进日常 profile）、AppleScript 控制报 -10084 要自动化授权。
+BROWSER="/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+# Edge 独立 profile。dsh 的认证是自持的（10-05 实测）：GET /?token=xxx → 303 种下
 # Set-Cookie: dsh-auth-*（HttpOnly，Max-Age 30 天）→ 之后裸 URL 返 200，不碰任何
-# 外部 cookie，所以拆独立目录零代价。收益：不往日常 profile 塞 dsh 的 cookie 与历史，
-# 且躲开「日常 profile 被占用/被锁导致 --app 起不来」整类问题。
-BROWSER_PROFILE="$HOME/.dsh/chrome-profile"
+# 外部 cookie，所以拆独立目录零代价。收益：不往日常 profile（2.2G）塞 dsh 的
+# cookie 与历史，且躲开「日常 profile 被占用/被锁导致 --app 起不来」整类问题。
+BROWSER_PROFILE="$HOME/.dsh/edge-profile"
 
 notify() { osascript -e "display notification \"$1\" with title \"DSH\"" >/dev/null 2>&1; }
 
@@ -63,7 +60,7 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 if [ ! -x "$BROWSER" ]; then
-  notify "未找到 Google Chrome，无法打开窗口"
+  notify "未找到 Microsoft Edge，无法打开窗口"
   exit 1
 fi
 if [ ! -x "$DSH_BIN" ] && [ ! -f "$PLIST" ]; then
@@ -120,9 +117,12 @@ reap_zombie_browser() {
   local running renderers
   running="$(pgrep -f "user-data-dir=$BROWSER_PROFILE" 2>/dev/null | head -1)"
   [ -n "$running" ] || return 0
-  # 主进程的命令行里没有 --type= 标记；有子进程标记的是 renderer/gpu/utility
-  pgrep -lf "user-data-dir=$BROWSER_PROFILE" 2>/dev/null \
-    | grep -q -- "--type=" && return 0
+  # 判据只看 renderer 数 —— **有窗口 = 有 renderer 进程**。
+  # 踩过的坑：原先写成「命令行里有 --type= 子进程标记就算有窗口」，但 gpu /
+  # network / utility 这些子进程**关窗后依然存在**，只有 renderer 会跟着窗口一起
+  # 消失。于是 Edge 处在「gpu+utility 在、renderer=0」这个真正的空壳状态时，函数
+  # 判成「有窗口」直接 return，空壳永远清不掉 → 第二次点 app 开不出窗口。
+  # 只在 renderer=0（确无窗口）时 kill；有窗口时绝不碰。
   renderers="$(pgrep -lf "user-data-dir=$BROWSER_PROFILE" 2>/dev/null | grep -c -- '--type=renderer')"
   [ "$renderers" -eq 0 ] || return 0
   pkill -f "user-data-dir=$BROWSER_PROFILE" 2>/dev/null
