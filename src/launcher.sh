@@ -86,17 +86,22 @@ open_window() {
   mkdir -p "$BROWSER_PROFILE"
   reap_zombie_browser
   disable_browser_translate
-  # **不能用 exec**（2026-10-05 换 Chrome 后才暴露的真根因，之前误判成bundle id
+  # **不能用 exec**（2026-10-05 换Chrome 后才暴露的真根因，之前误判成 bundle id
   # 和 Chromium 单实例两个原因，都不对）。
-  # exec 会把 dsh.app 这个进程**替换**成浏览器进程，pid 不变。于是 macOS
+  # exec 把 dsh.app 这个进程**原地替换**成浏览器进程，pid 不变。于是 macOS
   # LaunchServices 认为「dsh.app 还在运行」→ 第二次点 app 时它只做 activate
   # 已有进程，**launcher 根本不重跑** → 浏览器收到的是上一轮那个 URL/首页，
   # 用户看到的就是「浏览器默认界面」。
-  # 实测证据：关窗后再点 app，浏览器命令行里 --app=... 明明带着，却显示
+  # 实测证据：关窗后再点 app，浏览器命令行里--app=... 明明带着，却显示
   # Google 首页；且主进程 ppid 已退出（被 init 收养）= 确实是 exec 顶替的。
-  # 改成后台起 + 立刻退出：让 LaunchServices 认定 app 已结束，下次点击必重跑。
-  # Chrome 自身会 fork 成浏览器主进程并脱离，本进程退出不影响它。
-  "$BROWSER" --user-data-dir="$BROWSER_PROFILE" --app="$1" >/dev/null 2>&1 &
+  #
+  # 也不能只写 `"$BROWSER" ... &` + exit 0（试过）：launcher 一退出，shell 就给
+  # 后台 job 发 SIGHUP 把它连带杀掉 → 窗口一闪而过然后崩（Jimmy 实测反馈）。
+  # nohup 让 Chrome 忽略 SIGHUP，于是它能活过 launcher 的退出；
+  # Chrome 自己会 fork 出浏览器主进程并脱离父进程组，本进程退出不影响它。
+  # disown 再补一刀：把 job 从 shell 的作业表摘掉，退出时连 SIGHUP 都不发。
+  nohup "$BROWSER" --user-data-dir="$BROWSER_PROFILE" --app="$1" >/dev/null 2>&1 &
+  disown 2>/dev/null || true
   exit 0
 }
 
