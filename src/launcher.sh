@@ -1,6 +1,6 @@
 #!/bin/bash
 # dsh.app 启动入口
-# 职责：确保服务在跑 → 等就绪 → 开 Edge --app 独立窗口
+# 职责：确保服务在跑 → 等就绪 → 开 Chrome --app 独立窗口
 #
 # 2026-09-14 改造（服务已由 launchd 托管，见 README「进程层」）：
 #   - 删除 nohup 自拉段：launchd（ai.dsh.web，KeepAlive=true）是唯一拉起方，
@@ -17,7 +17,7 @@
 #     但返 404，旧判据会直接把 404 窗口推给用户。401/2xx 才算就绪。
 #   - 401 兜底：cookie 过期时会开出 401 页；此时从 web.log 抓最后一条带 token
 #     的 URL 直接开，免去用户手动翻日志。
-#   - 补 Edge / dsh 缺失的快速失败提示（原来只有 node 有守护，会傻等 30s）。
+#   - 补浏览器 / dsh 缺失的快速失败提示（原来只有 node 有守护，会傻等 30s）。
 #
 # 2026-10-05 改造：常量/就绪判据/失效锁处理抽到 dsh-lib.sh（三脚本共用）。关键补齐：
 #   **启动动作前 reap_stale_lock**。此前只有 dsh-restart 有这道保护，launcher.sh 没有
@@ -39,16 +39,21 @@ fi
 # shellcheck source=../src/dsh-lib.sh
 . "$LIB"
 
-EDGE="/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
-# Edge 独立 profile。实测（10-05）dsh 的认证是自持的：GET /?token=xxx → 303
-# 种下 Set-Cookie: dsh-auth-*（HttpOnly，Max-Age 30 天）→ 之后裸 URL 返 200。
-# 全程与日常 Edge 的任何 cookie/登录态无关，所以拆独立 profile **零代价**。
-# 收益有两条实打实的：
-#   1) 不再往 Jimmy 日常 2.2GB 的 Edge profile 里塞 dsh 的 cookie 和历史记录；
-#   2) 日常 profile 被占用/被锁（Edge 正在更新、profile 目录被别的进程持有）时，
-#      --app 可能起不来或抛 profile in use，独立目录躲开这一整类问题。
-# ponytail: 首次开窗仍需 token URL 一次（cookie 还没种），这条 401 兜底继续留着。
-EDGE_PROFILE="$HOME/.dsh/edge-profile"
+# 浏览器壳。**2026-10-05 从 Edge 换成 Chrome**，因为 Edge 与日常浏览共用 bundle id
+# （都是 com.microsoft.edgemac），导致两个实例在 macOS 眼里是同一个 app：
+#   - AppleScript 分不清两者，`activate` 会把日常 Edge 一起提到前台；
+#   - 没法只把 dsh 窗口切到最前 → 点 app 后视线落在日常 Edge 的新标签页上。
+# Chrome 的 bundle id 是 com.google.Chrome，独立，能精确 activate。这是换浏览器的
+# 唯一理由（功能上两者都支持 --app / --user-data-dir）。
+# 顺带：Safari 曾被考虑过，实测否掉—— 无 --app（窗口带地址栏）、无
+# --user-data-dir（cookie 直接进日常 profile）、且 AppleScript 控制要-10004
+# 自动化授权。
+BROWSER="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+# 独立 profile。dsh 的认证是自持的（10-05 实测）：GET /?token=xxx → 303 种下
+# Set-Cookie: dsh-auth-*（HttpOnly，Max-Age 30 天）→ 之后裸 URL 返 200，不碰任何
+# 外部 cookie，所以拆独立目录零代价。收益：不往日常 profile 塞 dsh 的 cookie 与历史，
+# 且躲开「日常 profile 被占用/被锁导致 --app 起不来」整类问题。
+BROWSER_PROFILE="$HOME/.dsh/chrome-profile"
 
 notify() { osascript -e "display notification \"$1\" with title \"DSH\"" >/dev/null 2>&1; }
 
@@ -57,8 +62,8 @@ if ! command -v node >/dev/null 2>&1; then
   notify "未找到 node，无法启动 dsh web"
   exit 1
 fi
-if [ ! -x "$EDGE" ]; then
-  notify "未找到 Microsoft Edge，无法打开窗口"
+if [ ! -x "$BROWSER" ]; then
+  notify "未找到 Google Chrome，无法打开窗口"
   exit 1
 fi
 if [ ! -x "$DSH_BIN" ] && [ ! -f "$PLIST" ]; then
@@ -78,35 +83,37 @@ token_url() {
 }
 
 open_window() {
-  mkdir -p "$EDGE_PROFILE"
-  reap_zombie_edge
-  disable_edge_translate
-  exec "$EDGE" --user-data-dir="$EDGE_PROFILE" --app="$1"
+  mkdir -p "$BROWSER_PROFILE"
+  reap_zombie_browser
+  disable_browser_translate
+  exec "$BROWSER" --user-data-dir="$BROWSER_PROFILE" --app="$1"
 }
 
-# 清掉「关窗后的 Edge 空壳」。
-# 现象（2026-10-05 实测复现）：关掉 dsh 窗口后，Edge 的浏览器进程**不会退出**（macOS
-# 上 Edge 是常驻的），于是第二次点 app 时，新起的 Edge 进程发现「同 profile 已有实例」
-# → 把自己降级成URL 转发器，**完全忽略新命令行里的 --app**。结果：URL 被送给一个
+# 清掉「关窗后的浏览器空壳」。
+# 现象（2026-10-05 在 Edge 上实测复现）：关掉 dsh 窗口后，浏览器进程**不会退出**（macOS
+# 上 Chromium 常驻），于是第二次点 app 时，新起的进程发现「同 profile 已有实例」→
+# 把自己降级成URL 转发器，**完全忽略新命令行里的 --app**。结果：URL 被送给一个
 # 已经没有窗口的旧实例，**一个窗口都不开**（renderer 数 = 0 实测），用户看到的就是
 # 「浏览器默认界面」而不是 dsh web。
+# Chromium 单实例靠 profile 目录里的 SingletonLock 软链实现（Edge 上实测
+# `SingletonLock -> Mac-8208`），所以换浏览器也躲不掉，只能自己清。
 # 判据：主进程还在（pgrep 命中且无 --type= 子进程标记）但 renderer 数为 0 → 正是这个
 # 空壳状态。只在这种情况下 kill；有窗口时绝不碰（否则会把正在用的窗口杀掉）。
 # pgrep -f 而不是 `ps | grep`：后者在这台机器上匹配不到（多次实测返回 0）。
-reap_zombie_edge() {
+reap_zombie_browser() {
   local running renderers
-  running="$(pgrep -f "user-data-dir=$EDGE_PROFILE" 2>/dev/null | head -1)"
+  running="$(pgrep -f "user-data-dir=$BROWSER_PROFILE" 2>/dev/null | head -1)"
   [ -n "$running" ] || return 0
   # 主进程的命令行里没有 --type= 标记；有子进程标记的是 renderer/gpu/utility
-  pgrep -lf "user-data-dir=$EDGE_PROFILE" 2>/dev/null \
+  pgrep -lf "user-data-dir=$BROWSER_PROFILE" 2>/dev/null \
     | grep -q -- "--type=" && return 0
-  renderers="$(pgrep -lf "user-data-dir=$EDGE_PROFILE" 2>/dev/null | grep -c -- '--type=renderer')"
+  renderers="$(pgrep -lf "user-data-dir=$BROWSER_PROFILE" 2>/dev/null | grep -c -- '--type=renderer')"
   [ "$renderers" -eq 0 ] || return 0
-  pkill -f "user-data-dir=$EDGE_PROFILE" 2>/dev/null
+  pkill -f "user-data-dir=$BROWSER_PROFILE" 2>/dev/null
   sleep 1
 }
 
-# 关掉 Edge 的「是否翻译此页面」气泡。
+# 关掉浏览器的「是否翻译此页面」气泡。
 # 起因：dsh 的 Web UI 是英文、本机界面语言 zh-CN，而独立 profile 每次新建都「从未
 # 翻译过」，于是每次开窗都弹这个框。
 # 走过两段弯路，别再试：
@@ -121,8 +128,8 @@ reap_zombie_edge() {
 # 用 plutil 改 JSON（macOS 自带，不用 python）；Edge 退出时会拿内存里的值覆盖，所以
 # 每次开窗前重写一遍——幂等。
 # 兜底：prefs 写坏了不能让它挡住开窗，失败就继续开（顶多多弹一次框）。
-disable_edge_translate() {
-  local prefs="$EDGE_PROFILE/Default/Preferences" want='{"enabled":false,"blocked_languages":["en"]}'
+disable_browser_translate() {
+  local prefs="$BROWSER_PROFILE/Default/Preferences" want='{"enabled":false,"blocked_languages":["en"]}'
   [ -f "$prefs" ] || return 0
   cp "$prefs" "$prefs.dsh-bak" 2>/dev/null
   # 判块在不在用 grep 而不是 plutil -extract：plutil 对嵌套 dict 的 extract 也会报
