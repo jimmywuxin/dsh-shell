@@ -40,6 +40,15 @@ fi
 . "$LIB"
 
 EDGE="/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+# Edge 独立 profile。实测（10-05）dsh 的认证是自持的：GET /?token=xxx → 303
+# 种下 Set-Cookie: dsh-auth-*（HttpOnly，Max-Age 30 天）→ 之后裸 URL 返 200。
+# 全程与日常 Edge 的任何 cookie/登录态无关，所以拆独立 profile **零代价**。
+# 收益有两条实打实的：
+#   1) 不再往 Jimmy 日常 2.2GB 的 Edge profile 里塞 dsh 的 cookie 和历史记录；
+#   2) 日常 profile 被占用/被锁（Edge 正在更新、profile 目录被别的进程持有）时，
+#      --app 可能起不来或抛 profile in use，独立目录躲开这一整类问题。
+# ponytail: 首次开窗仍需 token URL 一次（cookie 还没种），这条 401 兜底继续留着。
+EDGE_PROFILE="$HOME/.dsh/edge-profile"
 
 notify() { osascript -e "display notification \"$1\" with title \"DSH\"" >/dev/null 2>&1; }
 
@@ -68,7 +77,10 @@ token_url() {
   printf '%s' "$u"
 }
 
-open_window() { exec "$EDGE" --app="$1"; }
+open_window() {
+  mkdir -p "$EDGE_PROFILE"
+  exec "$EDGE" --user-data-dir="$EDGE_PROFILE" --app="$1"
+}
 
 # 就绪则开窗口并 exec（进程替换，函数不返回）；未就绪返回 1。
 # 无 token 时 401 页就是当前状态，此时用裸 URL 打开即可。
