@@ -33,6 +33,15 @@
   第二个进程只送 URL 不执行命令行。所以 launcher 必须自己清空壳
 - **dsh-kill 后要重跑 `build.sh` 才能恢复服务**（在非真终端环境下）
 
+### 已知行为（不是 bug）
+
+- **每次点 app 都会新开一个窗口**，已有窗口会被关掉。这是为解决「第二次点 app
+  不重跑 launcher」而刻意选的取舍：exec 启动 → 进程被浏览器顶替 → LaunchServices
+  认为 app 还在运行 → 只activate 不重跑。所以在 exec 前无条件清掉上次残留。
+  想要「已有窗口就切过去」需要能定位窗口 id，而本机没有辅助功能权限
+  （osascript 报-10004），做不了
+- **`dsh-kill` 后要重跑 `build.sh` 才能恢复服务**（本shell 里bootstrap 必然失败）
+
 ### 踩过的坑（写在这里省得后人重踩）
 
 - **`exec` 不能用在 launcher 的最后一步**。exec 把 dsh.app 进程原地替换成浏览器
@@ -45,3 +54,10 @@
 - **`--disable-features=Translate` 无效**（`Translate` 不是有效 feature 名）
 - **参数出现在 cmdline 里 ≠ 参数生效了**。遇「明明有参数却没效果」，先问
   「这条命令行有没有被执行」，看 `ppid`
+- **`nohup ... &` + `disown` 不能用**。它让浏览器活过 launcher 退出，但代价是变成
+  孤儿子进程（ppid = /sbin/launchd），macOS 上 Chromium 对孤儿的 `--app` 窗口
+  不给创建 —— 进程活着、命令行带 --app、renderer=0、一个窗口都不开且无崩溃记录。
+  唯一可用的是 `exec`
+- **沙箱里测不出的结论不能用来改代码**。本项目的shell 是沙箱进程，Edge/Chrome 在
+  里面起不来窗口；「裸 & 会被 SIGHUP 杀掉」这类结论在沙箱里得出的不可靠，
+  照着改会让真机更坏
