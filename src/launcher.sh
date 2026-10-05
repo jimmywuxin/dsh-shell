@@ -79,8 +79,31 @@ token_url() {
 
 open_window() {
   mkdir -p "$EDGE_PROFILE"
+  reap_zombie_edge
   disable_edge_translate
   exec "$EDGE" --user-data-dir="$EDGE_PROFILE" --app="$1"
+}
+
+# 清掉「关窗后的 Edge 空壳」。
+# 现象（2026-10-05 实测复现）：关掉 dsh 窗口后，Edge 的浏览器进程**不会退出**（macOS
+# 上 Edge 是常驻的），于是第二次点 app 时，新起的 Edge 进程发现「同 profile 已有实例」
+# → 把自己降级成URL 转发器，**完全忽略新命令行里的 --app**。结果：URL 被送给一个
+# 已经没有窗口的旧实例，**一个窗口都不开**（renderer 数 = 0 实测），用户看到的就是
+# 「浏览器默认界面」而不是 dsh web。
+# 判据：主进程还在（pgrep 命中且无 --type= 子进程标记）但 renderer 数为 0 → 正是这个
+# 空壳状态。只在这种情况下 kill；有窗口时绝不碰（否则会把正在用的窗口杀掉）。
+# pgrep -f 而不是 `ps | grep`：后者在这台机器上匹配不到（多次实测返回 0）。
+reap_zombie_edge() {
+  local running renderers
+  running="$(pgrep -f "user-data-dir=$EDGE_PROFILE" 2>/dev/null | head -1)"
+  [ -n "$running" ] || return 0
+  # 主进程的命令行里没有 --type= 标记；有子进程标记的是 renderer/gpu/utility
+  pgrep -lf "user-data-dir=$EDGE_PROFILE" 2>/dev/null \
+    | grep -q -- "--type=" && return 0
+  renderers="$(pgrep -lf "user-data-dir=$EDGE_PROFILE" 2>/dev/null | grep -c -- '--type=renderer')"
+  [ "$renderers" -eq 0 ] || return 0
+  pkill -f "user-data-dir=$EDGE_PROFILE" 2>/dev/null
+  sleep 1
 }
 
 # 关掉 Edge 的「是否翻译此页面」气泡。
