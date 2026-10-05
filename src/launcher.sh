@@ -1,6 +1,6 @@
 #!/bin/bash
 # dsh.app 启动入口
-# 职责：确保服务在跑 → 等就绪 → 开 Chrome --app 独立窗口
+# 职责：确保服务在跑 → 等就绪 → 开 Edge --app 独立窗口
 #
 # 2026-09-14 改造（服务已由 launchd 托管，见 README「进程层」）：
 #   - 删除 nohup 自拉段：launchd（ai.dsh.web，KeepAlive=true）是唯一拉起方，
@@ -93,8 +93,8 @@ open_window() {
   #
   # exec 曾被认为会导致「第二次点 app 不重跑 launcher」（因为进程被顶替、
   # LaunchServices 认为 app 还在运行）—— 这条观察本身没错，但解法不该是换启动方式，
-  # 而是在**下次启动前把上次的残留清掉**：reap_zombie_browser 干的就是这件事
-  # （renderer=0 判空壳 → pkill）。两者结合 = 窗口能开 + 每次点 app 都重跑。
+  # 而是在**下次启动前把上次的残留清掉**（上面 reap_zombie_browser 无条件清）。
+  # 两者结合 = 窗口能开+ 每次点 app 都重跑 launcher。
   exec "$BROWSER" --user-data-dir="$BROWSER_PROFILE" --app="$1"
 }
 

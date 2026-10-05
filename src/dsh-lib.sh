@@ -104,23 +104,30 @@ wait_ready() {
 # 自检：`bash ~/.dsh/lib/dsh-lib.sh`。只断言最易回归的三处判据。
 # 不测 launchd_start —— 它会真 kickstart/bootout 线上服务。
 dsh_lib_selftest() {
-  local fail=0 tmp holder
+  local fail=0 tmp
   tmp="$(mktemp -d)"
-  LOG_DIR="$tmp"; LOCK="$tmp/lock"
-  URL="http://127.0.0.1:9"   # discard 端口，无人监听 → probe 得 000
+  # 在**子 shell** 里覆盖 URL/LOG_DIR/LOCK：这三个是本库的全局量，直接赋值会污染
+  # 调用方（万一有人 source 进来跑自检，就会把线上配置改掉，reap_stale_lock 还会
+  # 真的去建 $LOG_DIR/backups 目录）。子 shell 退出后改动自动消失。
+  (
+    LOG_DIR="$tmp"
+    LOCK="$tmp/lock"
+    URL="http://127.0.0.1:9"   # discard 端口，无人监听 → probe 得 000
 
-  probe_code | grep -qx 000 || { echo "FAIL: 空响应未兜底为 000"; fail=1; }
-  app_ready && { echo "FAIL: 无服务被判为就绪"; fail=1; }
+    [ "$(probe_code)" = "000" ] || { echo "FAIL: 空响应未兜底为 000"; exit 1; }
+    app_ready && { echo "FAIL: 无服务被判为就绪"; exit 1; }
 
-  : > "$LOCK"; reap_stale_lock >/dev/null
-  [ -f "$LOCK" ] || { echo "FAIL: 空锁被误删"; fail=1; }
+    : > "$LOCK"; reap_stale_lock >/dev/null 2>&1
+    [ -f "$LOCK" ] || { echo "FAIL: 空锁被误删"; exit 1; }
 
-  echo 999999 > "$LOCK"; reap_stale_lock >/dev/null
-  [ -f "$LOCK" ] && { echo "FAIL: 死 pid 的锁未清理"; fail=1; }
+    echo 999999 > "$LOCK"; reap_stale_lock >/dev/null 2>&1
+    [ -f "$LOCK" ] && { echo "FAIL: 死 pid 的锁未清理"; exit 1; }
 
-  echo $$ > "$LOCK"; reap_stale_lock >/dev/null
-  [ -f "$LOCK" ] || { echo "FAIL: 活 pid 的锁被误删"; fail=1; }
+    echo $$ > "$LOCK"; reap_stale_lock >/dev/null 2>&1
+    [ -f "$LOCK" ] || { echo "FAIL: 活 pid 的锁被误删"; exit 1; }
 
+    exit 0
+  ) || fail=1
   rm -rf "$tmp"
   [ "$fail" = 0 ] && echo "dsh-lib selftest OK"
   return "$fail"
