@@ -79,14 +79,40 @@ token_url() {
 
 open_window() {
   mkdir -p "$EDGE_PROFILE"
-  # --disable-features=Translate：dsh 的 Web UI 是英文，而本机界面语言是 zh-CN，
-  # 独立 profile 每次新建都「从未翻译过」，于是每次开窗都弹「是否翻译此页面」。
-  # 走命令行开关而不是写 profile 的 pref：开关跟着进程走，profile 随手删了重建都有效
-  #（pref 得重写，Edge 退出时还会拿内存里的值覆盖回去）。
-  # 查过 Edge 154 的内核**没有** --no-translate 这个开关（grep 过二进制，对照
-  # --no-first-run / --no-default-browser-check 都在），所以只能走 disable-features。
-  # 只关翻译，不影响 dsh 本身（dsh 的界面语言是应用内自己的，不靠 Edge 翻译）。
-  exec "$EDGE" --user-data-dir="$EDGE_PROFILE" --disable-features=Translate --app="$1"
+  disable_edge_translate
+  exec "$EDGE" --user-data-dir="$EDGE_PROFILE" --app="$1"
+}
+
+# 关掉 Edge 的「是否翻译此页面」气泡。
+# 起因：dsh 的 Web UI 是英文、本机界面语言 zh-CN，而独立 profile 每次新建都「从未
+# 翻译过」，于是每次开窗都弹这个框。
+# 走过两段弯路，别再试：
+#   ① `--disable-features=Translate` —— 无效。`Translate` 不是 Edge 154 的有效
+#      feature 名（grep 内核二进制 .../Frameworks/.../Microsoft Edge Framework 找不到），
+#      renderer 进程也没拿到这个 flag。
+#   ② 无脑 `plutil -replace translate.enabled` —— **pref 里 translate 块还不存在时
+#      plutil 报 "Key path not found" 直接失败**（实测0.004s），&& 短路 → 翻译块
+#      从来没被创建过。所以必须先判块在不在，不在就 -insert 建出来。
+# 现在走 profile 的 pref：Chromium 里翻译气泡由 `translate.enabled` 控制，
+# 「永不翻译此语言」写进 `translate.blocked_languages`。两者都写，双保险。
+# 用 plutil 改 JSON（macOS 自带，不用 python）；Edge 退出时会拿内存里的值覆盖，所以
+# 每次开窗前重写一遍——幂等。
+# 兜底：prefs 写坏了不能让它挡住开窗，失败就继续开（顶多多弹一次框）。
+disable_edge_translate() {
+  local prefs="$EDGE_PROFILE/Default/Preferences" want='{"enabled":false,"blocked_languages":["en"]}'
+  [ -f "$prefs" ] || return 0
+  cp "$prefs" "$prefs.dsh-bak" 2>/dev/null
+  # 判块在不在用 grep 而不是 plutil -extract：plutil 对嵌套 dict 的 extract 也会报
+  # "No value at that key path"（实测{"translate":{...}} 也判不出来），不可用。
+  if grep -q '"translate"' "$prefs" 2>/dev/null; then
+    # 块已存在 → 逐键改（-insert 在已存在时会失败）
+    plutil -replace translate.enabled -bool NO "$prefs" \
+      && plutil -replace translate.blocked_languages -json '["en"]' "$prefs"
+  else
+    # 块不存在 → 一次 insert 建出来
+    plutil -insert translate -json "$want" "$prefs"
+  fi || cp "$prefs.dsh-bak" "$prefs" 2>/dev/null
+  return 0
 }
 
 # 就绪则开窗口并 exec（进程替换，函数不返回）；未就绪返回 1。
