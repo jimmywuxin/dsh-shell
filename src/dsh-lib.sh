@@ -12,6 +12,19 @@
 # 该窗口内双击图标 → probe 返 000 → 误判「没跑」→ kickstart -k → 正中靶心。
 # 一处定义、三处复用，比在每个调用点各补一次 guard 更小也更不容易漏。
 
+# 一个修一处、三处受益：这三个脚本可能由 Finder 双击拉起（launcher.sh），也可能由
+# 任何 PATH 残缺的 shell 拉起（dsh-restart / dsh-kill 是命令行工具但常被自动化调用），
+# 所以都要自己补 PATH。候选必须与 build.sh 的 node 候选一致 —— 原先三处硬编码只列了
+# ~/.local/bin 和 /usr/local/bin，漏了 /opt/homebrew/bin：若机器上唯一的 node 装在
+# homebrew，build.sh 能渲染出可用的 plist，但脚本侧的 nohup 兜底会卡在
+# `#!/usr/bin/env node` 上找不到解释器。
+# 末尾用 ${PATH:-...} 而不是 $PATH：三个脚本都是 set -u，而 PATH 被清空过（env -i
+# 只留 HOME 的自动化调用）时 $PATH 是未绑定变量 → 整个脚本崩在 source 这一行。
+# 现实场景实测：`env -i HOME=$HOME bash -c '. dsh-lib.sh'` 能正常拿到 curl/pgrep。
+# $HOME 本身不兜底：launchd 与 Finder 都必给 HOME，plist 里的 @HOME@ 也依赖它，
+# 真没有就当环境坏了、早点崩比静默算错路径好。
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+
 LABEL="ai.dsh.web"
 DOMAIN="gui/$(id -u)"
 URL="http://127.0.0.1:3080"

@@ -29,7 +29,7 @@ set -u
 
 # Finder 双击启动时 PATH 只有 /usr/bin:/bin 等系统路径，找不到 node
 # （dsh 是 #!/usr/bin/env node 脚本）——显式补上 node 所在目录
-export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# PATH 由 dsh-lib.sh 统一补（含 /opt/homebrew/bin，与 build.sh 的 node 候选一致）
 
 LIB="$HOME/.dsh/lib/dsh-lib.sh"
 if [ ! -f "$LIB" ]; then

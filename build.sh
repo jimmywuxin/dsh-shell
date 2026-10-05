@@ -34,11 +34,13 @@ DOMAIN="gui/$(id -u)"
 LABEL="ai.dsh.web"
 
 mkdir -p "$BACKUP_DIR"
-# 备份统一放~/.dsh/backups/build/，只留最近 5 份同类文件——旧版把备份直接丢在
-# PATH目录（~/.npm-global/bin/*.bak-*）和 LaunchAgents（*.plist.bak-*）里，
+# 备份统一放 ~/.dsh/backups/build/，只留最近 5 份同类文件——旧版把备份直接丢在
+# PATH 目录（~/.npm-global/bin/*.bak-*）和 LaunchAgents（*.plist.bak-*）里，
 # 既污染 bin 目录又会被 launchd 扫到，累积到 6 份也没人清。
+#末尾的 `|| true` 是必需的：set -o pipefail 下，目录为空时 `ls` 返 1，
+# 整条管道返 1 → set -e 会把 build.sh 静默打断在第一次安装（实测 exit=1）。
 prune_backups() { # $1=文件名
-  ls -1t "$BACKUP_DIR/$1."* 2>/dev/null | tail -n +6 | while read -r old; do rm -f "$old"; done
+  ls -1t "$BACKUP_DIR/$1."* 2>/dev/null | tail -n +6 | while read -r old; do rm -f "$old"; done || true
 }
 
 # ── 1) node / dsh 前置检查（失败即停，不要先把旧产物拆了）─────────

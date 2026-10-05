@@ -30,7 +30,7 @@
 #      现在判据统一为 kill -0 探活，删不到活锁。
 set -u
 
-export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# PATH 由 dsh-lib.sh 统一补（含 /opt/homebrew/bin，与 build.sh 的 node 候选一致）
 
 LIB="$HOME/.dsh/lib/dsh-lib.sh"
 if [ ! -f "$LIB" ]; then
