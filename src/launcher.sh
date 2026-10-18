@@ -70,10 +70,12 @@ fi
 # token 直开：cookie 过期时 web.log 里最后一条带 token 的 URL 就是当前有效入口。
 # 字符集放宽到非空白/引号/&：token 是 base64url 风格，窄集合会匹配出被截断的
 # 无效 token，开出来照样 401，白折腾一趟。
+# 前缀从 $URL 派生（2026-10-18）：原来写死 127.0.0.1:3080，改端口/主机要改两处。
+# $URL 里的 `.` 在 BRE 里是通配，只用它定位日志行、不参与校验，误匹配面可忽略。
 token_url() {
   [ -f "$LOG_DIR/web.log" ] || return 1
   local u
-  u=$(grep -o 'http://127\.0\.0\.1:3080/?token=[^[:space:]"'"'"'&]*' "$LOG_DIR/web.log" | tail -1)
+  u=$(grep -o "${URL}/?token=[^[:space:]\"'&]*" "$LOG_DIR/web.log" | tail -1)
   [ -n "$u" ] || return 1
   printf '%s' "$u"
 }

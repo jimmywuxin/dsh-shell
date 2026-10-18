@@ -16,6 +16,12 @@
     走 launchctl bootout**，pkill 会被 KeepAlive 立刻复活。
   - 不设 EnvironmentVariables：provider 的 apiKeyEnv 由 ~/.dsh/.credentials.yaml
     的 refs 解析，服务进程不需要 shell 环境里的 key。
+  - WorkingDirectory（2026-10-18 补）：launchd 默认 cwd 是 `/`，不是家目录。dsh 把
+    process.cwd() 传给 profileContext 并 spawn 子进程，相对路径会落到只读的根目录。
+    实测服务 cwd 曾是 `/`（lsof -d cwd）。显式钉在 HOME。
+  - Umask 63 = 0o077（2026-10-18 补）：web.log 里记录了带 token 的入口 URL（launcher
+    靠它做 401 兜底），默认权限 644 意味着同机其他账户能读到 token、进而打开 loopback
+    上的完整 GUI。收成 0600。
 -->
 <plist version="1.0">
 <dict>
@@ -37,5 +43,9 @@
     <string>@HOME@/.dsh/web.log</string>
     <key>StandardErrorPath</key>
     <string>@HOME@/.dsh/web.err.log</string>
+    <key>WorkingDirectory</key>
+    <string>@HOME@</string>
+    <key>Umask</key>
+    <integer>63</integer>
 </dict>
 </plist>

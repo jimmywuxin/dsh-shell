@@ -2,6 +2,37 @@
 
 本项目的版本号按**功能里程碑**给，不按 commit 数给。修 bug 不升版本号。
 
+## v1.0.2 — 2026-10-18
+
+配置与流程加固：修 4 处缺陷，无新功能。
+
+### 改动
+
+- **plist 补 `WorkingDirectory`=HOME**：launchd 默认 cwd 是 `/`（`lsof -a -p <pid> -d cwd`
+  实测），而 dsh 把 `process.cwd()` 传进 `profileContext` 并 spawn 子进程 —— 相对路径
+  会落到只读的根目录。现显式钉在 `@HOME@`
+- **plist 补 `Umask`=63（0o077）**：`web.log` 里记录了带 token 的入口 URL（launcher 的
+  401 兜底要从这里抓），默认 umask 022 生成 644，同机其他账户可读到 token、进而打开
+  loopback 上带认证的完整 GUI。`build.sh` 同时对已有日志 `chmod 600`（plist 的 Umask
+  要重启服务才生效）
+- **`release.sh` 补 PATH**：`gh` 在 `/opt/homebrew/bin`，精简 PATH 下 `command -v gh`
+  失败 → 卡在「tag 已推、Release 未建」再 exit 1（2026-09-14 实踩过）
+- **`launcher.sh` 的 token 正则从 `$URL` 派生**：原来写死 `127.0.0.1:3080`，改
+  端口/主机要动两处
+- **`Info.plist` 版本号改由 `build.sh` 从 git tag 注入**（`v1.0.2` → `1.0.2`，
+  `CFBundleVersion` 用 commit 数）。此前写死 `1.0/1`，发了 v1.0.1 后 app 里还显示 1.0
+
+### 验证
+
+- 6 个脚本 `bash -n` 全过；`bash src/dsh-lib.sh` 自检 OK
+- 渲染后 plist `plutil -lint` 通过，`WorkingDirectory`/`Umask` 落成绝对路径与整数
+- 装配出的 `Info.plist` 读回 `CFBundleShortVersionString = 1.0.2`
+
+### 部署注意
+
+`WorkingDirectory` / `Umask` 要服务重新装载才生效（`bash build.sh --reload`，需真终端；
+或重启电脑）。`build.sh` 默认只更新 plist 文件、不 bootout（本 shell 里 bootstrap 必失败）。
+
 ## v1.0.1 — 2026-10-06
 
 过设计审查（ponytail）后的维护版：6 处删减 + 1 处抽象回收，**功能与行为等价**，
@@ -66,7 +97,10 @@
   无 `--user-data-dir` / AppleScript 控制需额外授权，同样不可用
 - **Chromium 单实例绕不掉**：profile 目录里 `SingletonLock` 软链决定谁是新实例，
   第二个进程只送 URL 不执行命令行。所以 launcher 必须自己清空壳
-- **dsh-kill 后要重跑 `build.sh` 才能恢复服务**（在非真终端环境下）
+- **WorkBuddy 派生的 shell 里手动 `launchctl bootstrap` 会报 `5: Input/output error`**
+  （沙箱限制，2026-10-18 复核仍如此）。恢复服务请跑 `dsh-restart` 或双击 `dsh.app`：
+  前者按「未装载 → bootstrap」处理，后者由 LaunchServices 拉起、不在该沙箱内。
+  **不需要**像早期文档说的那样重跑 `build.sh`
 
 ### 已知行为（不是 bug）
 
@@ -75,13 +109,13 @@
   认为 app 还在运行 → 只activate 不重跑。所以在 exec 前无条件清掉上次残留。
   想要「已有窗口就切过去」需要能定位窗口 id，而本机没有辅助功能权限
   （osascript 报-10004），做不了
-- **`dsh-kill` 后要重跑 `build.sh` 才能恢复服务**（本shell 里bootstrap 必然失败）
 
 ### 踩过的坑（写在这里省得后人重踩）
 
-- **`exec` 不能用在 launcher 的最后一步**。exec 把 dsh.app 进程原地替换成浏览器
-  进程（pid 不变）→ macOS LaunchServices 认为 app 还在运行 → 第二次点 app 只
-  activate、launcher 不重跑。改用 `nohup ... &` + `disown`（裸 `&` 会被 SIGHUP 杀掉）
+- **`exec` 会让 LaunchServices 认为 app 仍在运行**（dsh.app 进程被浏览器顶替、pid
+  不变）→ 第二次点 app 只 activate、launcher 不重跑。**但解法不是换启动方式**：
+  改成 `nohup ... &` + `disown` 会让浏览器变孤儿进程、一个窗口都不开（见下条）。
+  正解是**保留 `exec` + 每次开窗前无条件清掉上次残留**（`reap_zombie_browser`）
 - **「有 `--type=` 子进程」≠「有窗口」**。gpu / network / utility 关窗后依然存在，
   只有 renderer 随窗口消失。判有无窗口只能看 renderer 数
 - **`plutil -extract` 判键存在不可靠**（嵌套 dict 报 "No value atthat key path"），

@@ -34,6 +34,19 @@ DOMAIN="gui/$(id -u)"
 LABEL="ai.dsh.web"
 
 mkdir -p "$BACKUP_DIR"
+
+# 版本号从 git tag 取（v1.0.1 → 1.0.1），不再写死。
+# 2026-10-18：此前 Info.plist 固定 1.0/1，发了 v1.0.1 后 app 里还显示 1.0，
+# 「装的是哪版」只能靠猜。tag 缺失（浅克隆/非仓库）时退到 0.0.0，不让构建失败。
+APP_VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)"
+[ -n "$APP_VERSION" ] || APP_VERSION="0.0.0"
+APP_BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+[ -n "$APP_BUILD" ] || APP_BUILD=0
+
+# 日志权限兜底：web.log 里含带 token 的入口 URL（launcher 的 401 兜底要从这里抓），
+# 而 launchd 默认 umask 022 → 644，同机其他账户可读。plist 里的 Umask 要等
+# bootout/bootstrap 才生效，已有的两个日志需要当场收权限。幂等，缺文件不报错。
+chmod 600 "$HOME/.dsh/web.log" "$HOME/.dsh/web.err.log" 2>/dev/null || true
 # 备份统一放 ~/.dsh/backups/build/，只留最近 5 份同类文件——旧版把备份直接丢在
 # PATH 目录（~/.npm-global/bin/*.bak-*）和 LaunchAgents（*.plist.bak-*）里，
 # 既污染 bin 目录又会被 launchd 扫到，累积到 6 份也没人清。
@@ -113,7 +126,7 @@ mkdir -p "$APP_NEW/Contents/MacOS" "$APP_NEW/Contents/Resources"
 cp src/launcher.sh "$APP_NEW/Contents/MacOS/dsh"
 chmod +x "$APP_NEW/Contents/MacOS/dsh"
 cp "$ICNS" "$APP_NEW/Contents/Resources/AppIcon.icns"
-cat > "$APP_NEW/Contents/Info.plist" <<'EOF'
+cat > "$APP_NEW/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -123,8 +136,8 @@ cat > "$APP_NEW/Contents/Info.plist" <<'EOF'
   <key>CFBundleExecutable</key><string>dsh</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
+  <key>CFBundleVersion</key><string>${APP_BUILD}</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
 </dict>
@@ -139,7 +152,7 @@ if [ -d "$APP" ]; then
 fi
 mv "$APP_NEW" "$APP"
 
-echo "完成：双击 $APP 即用"
+echo "完成：双击 $APP 即用（v${APP_VERSION}，build ${APP_BUILD}）"
 if [ -n "${REPLACED:-}" ]; then
   echo "旧产物已移至废纸篓：$REPLACED"
 fi

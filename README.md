@@ -14,7 +14,7 @@ DSH Web GUI 的纯 UI 桌面壳：Edge `--app` 独立窗口 + launchd 服务常�
   - 非托管分支的进程匹配修正为真实 argv（`node …/dsh/lib/bin.js --profile web`）——旧的 `pkill -f "dsh web"` 一个进程都匹配不到
   - `launcher.sh` 删除自拉段（改为 `launchctl kickstart -k`），就绪判据改用 HTTP 状态码，并支持 401 时用 web.log 里的 token URL 直开
   - launchd plist 纳入仓库（`src/ai.dsh.web.plist`，构建时渲染），`build.sh` 不再无条件覆盖线上脚本
-  - plist 里的 node **只取本机独立安装的**（`~/.local/bin` → Homebrew → `/usr/local`，取版本最高者），显式排除 WorkBuddy 内置的 `~/.workbuddy/binaries/node/...`：那是另一个 App 的内部目录，随它升级/清理而变动，常驻服务不该依赖；本机没有独立 node 时 `build.sh` 直接报错退出，不静默回退
+  - plist 里的 node **只取本机独立安装的**（`~/.local/bin` → Homebrew → `/usr/local`，**按序取第一个可执行的**），显式排除 WorkBuddy 内置的 `~/.workbuddy/binaries/node/...`：那是另一个 App 的内部目录，随它升级/清理而变动，常驻服务不该依赖；本机没有独立 node 时 `build.sh` 直接报错退出，不静默回退
 - **2026-09-23 改造**：补上「bootout 之后的恢复路径」。原版 `launcher.sh` 只对**已装载**的服务 `kickstart`，而 `dsh-kill` 走的是 `bootout`（把服务从 launchd 卸载）—— 于是**跑过 `dsh-kill` 后双击图标必报「服务未运行，且未找到 launchd 服务 ai.dsh.web」**。现为三级顺序兜底：
   - `launcher.sh`：`kickstart`（已装载）→ `bootstrap plist`（已卸载，从文件重新装载）→ `nohup` 兜底（launchd 两条路都不通时，保证图标永远能用；此分支 launchd 未托管，不存在双实例）
   - `dsh-restart`：同样先 `bootstrap` 再考虑 nohup（原版会静默 nohup 手起，把服务**拖离 launchd 托管**、丢掉 KeepAlive，直到下次登录才回正轨）
@@ -31,6 +31,10 @@ DSH Web GUI 的纯 UI 桌面壳：Edge `--app` 独立窗口 + launchd 服务常�
   - **备份统一到 `~/.dsh/backups/build/`**并只留最近 5 份；旧版把备份丢在 `~/.npm-global/bin/*.bak-*`（污染 PATH 目录，已积 6 份）和 `LaunchAgents/*.plist.bak-*`
   - token 正则放宽到非空白/引号/`&`（窄集合会匹配出被截断的无效 token）
   - lib 自检：`bash src/dsh-lib.sh`（断言空响应兜底 000、无服务不判就绪、空锁不误删、死 pid 锁会清、活 pid 锁不删）
+- **2026-10-18 加固**：三处配置/流程缺陷（审查发现，均有实测证据）
+  - **plist 补 `WorkingDirectory`**：launchd 默认 cwd 是 `/`（`lsof -d cwd` 实测），而 dsh 把 `process.cwd()` 传进 `profileContext` 并 spawn 子进程 —— 相对路径会落到只读的根目录。现钉在 `@HOME@`
+  - **plist 补 `Umask`=63（0o077）**：`web.log` 里记录了带 token 的入口 URL（launcher 的 401 兜底要从这里抓），默认 644 让同机其他账户可读到 token、进而打开 loopback 上的完整 GUI。`build.sh` 顺手把已有日志 `chmod 600`
+  - **`release.sh` 补 PATH**：`gh` 装在 `/opt/homebrew/bin`，精简 PATH 下 `command -v gh` 失败 → 卡在「tag 已推、Release 未建」；`Info.plist` 的版本号改由 `build.sh` 从 git tag 注入（此前写死 1.0）
 - **起草**：热巴（需求调研 + 方案设计 + 环境核查）
 
 ## 架构（三层职责分离）

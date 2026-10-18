@@ -15,6 +15,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# gh 装在 /opt/homebrew/bin，而自动化/精简 shell 的 PATH 常常只有 /usr/bin:/bin
+# （2026-09-14 实踩：tag 已推完才发现 command -v gh 找不到 → Release 没建 → exit 1，
+#  只能手工补发。2026-10-18 复核 PATH 里确实没有 /opt/homebrew/bin）。
+# 优先本机实际安装位置，其次回落到原 PATH。
+PATH="/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin}"
+export PATH
+
 VERSION="${1:-}"
 TITLE="${2:-}"
 NOTES="${3:-}"
