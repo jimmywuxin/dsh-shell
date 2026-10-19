@@ -2,6 +2,32 @@
 
 本项目的版本号按**功能里程碑**给，不按 commit 数给。修 bug 不升版本号。
 
+## 未发布（2026-10-19）— 原生 WKWebView 壳
+
+**动机**：Edge `--app` 窗口的红叉由 Chromium 写死为「关闭窗口」，关掉最后一个窗口浏览器即退出，没有开关能改掉「关闭窗口」这个行为。改成原生 NSWindow + WKWebView 后，`windowShouldClose` 改为 `orderOut`：红叉隐藏窗口（飞书式，Dock 只留应用图标、不留缩略图），点 dock 图标恢复，应用与页面状态常驻。
+
+### 改动
+
+- 新增 **`src/DshApp.swift`**（原生壳）：红叉→隐藏窗口（飞书式）、cookie 认证、`<input type=file>` → NSOpenPanel、`target=_blank`/外链 → 默认浏览器、下载 → NSSavePanel、⌘R 重连、缩放/全屏/编辑菜单；`webView.isInspectable = true` 供 Safari 检查
+- **认证**：用 `~/.dsh/.credentials.yaml` 的 `client-connection/browser-session` 签名密钥现场 mint cookie（`dsh-auth-<base64url(sha256(authority))>`、`v1.<body>.<base64url(HMAC)>`），不再依赖 web.log 里那批已失效的 token URL（逐条实测全 401）
+- **`src/launcher.sh` 收缩**为「只等服务就绪」（`--ensure`，由壳调用）；删掉 Edge 窗口、独立 profile、翻译气泡、zombie 清理、token 兜底
+- **`build.sh`**：`swiftc -O -parse-as-library` 编译 → `Contents/MacOS/dsh`；`launcher.sh` 移到 `Contents/Resources/`；Info.plist 补 ATS（loopback）与 LSMinimumSystemVersion 12.0；app 做 ad-hoc 签名
+- README 的架构图、目录结构、决策记录同步
+
+### 验证
+
+- 编译无 error，`bash build.sh` 全程通过，app 落在 `~/Applications/dsh.app`
+- 启动后 `~/.dsh/shell.log`：`ensure: exit=0` → `loaded: http://127.0.0.1:3080/` → `page title: DeepSeek Harness`
+- `WebKit.Networking` 与 3080 建多条 ESTABLISHED；WebKit 数据目录落在 `~/Library/WebKit/com.jimmy.dsh-shell/`
+- **红叉行为自测**：用同一份壳代码注入自测分支，`performClose` 后 `visible=false miniaturized=false`，reopen 后 `visible=true`，进程存活
+- 窗口首启 1280×860 居中；窗口标题 `DeepSeek Harness`，Dock 图标为 dsh 自己的
+
+### 代价
+
+- 渲染引擎从 Chromium 换成 WebKit（实测页面、会话、WebSocket 均正常）
+- 没有 Edge DevTools；需要时用 Safari「开发」菜单检查本 app
+- 少数浏览器能力由壳实现（页面内查找等未覆盖的按需再补）
+
 ## v1.0.2 — 2026-10-18
 
 配置与流程加固：修 4 处缺陷，无新功能。

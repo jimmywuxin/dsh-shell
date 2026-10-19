@@ -1,13 +1,13 @@
 # dsh-shell
 
-DSH Web GUI 的纯 UI 桌面壳：Edge `--app` 独立窗口 + launchd 服务常驻。**不是 Electron，不是 dsh-desktop 那种全家桶**——只做「脱离浏览器」这一件事。
+DSH Web GUI 的纯 UI 桌面壳：原生 WKWebView 窗口 + launchd 服务常驻。**不是 Electron，不是 dsh-desktop 那种全家桶**——只做「脱离浏览器」这一件事。
 
 > **权威设计文档**：`~/shared-memory/private/reba/2026-08-29_dsh_桌面端UI壳技术方案.md`
 > （含完整参考实现、前置核查、升级路径、验收清单——开发前必读）
 
 ## 状态
 
-- **方案**：渐进路线——①A（Edge `--app` 窗口 + .app 内嵌守护）已完成验收；①B（launchd 常驻）**已于 2026-09 启用**（见下方「进程层」与决策记录）
+- **方案**：渐进路线——①A（Edge `--app` 窗口 + .app 内嵌守护）已完成验收；①B（launchd 常驻）**已于 2026-09 启用**（见下方「进程层」与决策记录）；2026-10-19 壳从 Edge `--app` 换成原生 WKWebView（见下）
 - **开发**：A 阶段 2026-08-29 完成并真机验收（launcher.sh + build.sh，.app 构建至 `~/Applications/dsh.app`）
 - **2026-09-14 改造**：服务已由 launchd（`ai.dsh.web`）托管，因此
   - `dsh-kill` / `dsh-restart` 改为 launchd 感知（`launchctl bootout` / `kickstart -k`），旧的 pkill 路径保留为非托管兜底
@@ -35,6 +35,13 @@ DSH Web GUI 的纯 UI 桌面壳：Edge `--app` 独立窗口 + launchd 服务常�
   - **plist 补 `WorkingDirectory`**：launchd 默认 cwd 是 `/`（`lsof -d cwd` 实测），而 dsh 把 `process.cwd()` 传进 `profileContext` 并 spawn 子进程 —— 相对路径会落到只读的根目录。现钉在 `@HOME@`
   - **plist 补 `Umask`=63（0o077）**：`web.log` 里记录了带 token 的入口 URL（launcher 的 401 兜底要从这里抓），默认 644 让同机其他账户可读到 token、进而打开 loopback 上的完整 GUI。`build.sh` 顺手把已有日志 `chmod 600`
   - **`release.sh` 补 PATH**：`gh` 装在 `/opt/homebrew/bin`，精简 PATH 下 `command -v gh` 失败 → 卡在「tag 已推、Release 未建」；`Info.plist` 的版本号改由 `build.sh` 从 git tag 注入（此前写死 1.0）
+- **2026-10-19 换壳（Edge `--app` → 原生 WKWebView）**：红叉在 Edge `--app` 窗口里由 Chromium 写死为「关闭窗口」，关掉最后一个窗口浏览器即退出，没有任何开关能改掉「关闭窗口」这个行为。现换成原生壳 `src/DshApp.swift`（NSWindow + WKWebView）：
+  - **红叉 = 隐藏窗口（飞书式）**：`windowShouldClose` 返回 false 并 `orderOut`——窗口从桌面消失、Dock 里**不留缩略图**，应用继续运行、图标留在 Dock；点 Dock 图标（`applicationShouldHandleReopen` / `applicationDidBecomeActive`）重新显示。已自测：关闭后 `visible=false miniaturized=false`，reopen 后 `visible=true`。
+  - **认证**：不再依赖 `web.log` 里的 token URL（实测 124 条历史 token 与当前进程不匹配，全是 401）。壳用 `~/.dsh/.credentials.yaml` 的 `client-connection/browser-session` 签名密钥现场 mint cookie（`dsh-auth-<sha256(authority)>` + `v1.<body>.<HMAC>`），实测 200；cookie 过期时 ⌘R 会重新 mint。
+  - **WebKit 实测**：页面标题、会话列表、点开会话正文（1.2 万字）、输入框/文件输入均正常；没有 Chromium 那类 renderer 崩溃。
+  - **补的浏览器能力**：`<input type=file>` → NSOpenPanel、`target=_blank`/外链 → 默认浏览器、下载 → NSSavePanel、`⌘R` 重连、缩放/全屏菜单。
+  - **代价**：没有 Edge DevTools；壳已开 `webView.isInspectable = true`，需要时在 Safari「设置 → 高级 → 显示网页开发者功能」后用「开发」菜单检查本 app。
+  - **服务层不变**：launchd plist、`dsh-lib.sh`、`dsh-restart`、`dsh-kill` 全保留；`launcher.sh` 收缩为 `--ensure`（只等服务就绪），由壳在开窗前调用。旧 Edge 壳的 app 已进废纸篓，`~/.dsh/edge-profile` 不再使用（可删）。
 - **起草**：热巴（需求调研 + 方案设计 + 环境核查）
 
 ## 架构（三层职责分离）
@@ -42,9 +49,9 @@ DSH Web GUI 的纯 UI 桌面壳：Edge `--app` 独立窗口 + launchd 服务常�
 ```
 进程层（launchd 常驻）    —— LaunchAgent ai.dsh.web（RunAtLoad + KeepAlive=true）
    ↓ 127.0.0.1:3080
-launcher.sh（胶水层）    —— 只做两件事：等服务就绪 → 开 Edge --app 窗口
+launcher.sh（服务层）    —— 只做一件事：把服务等到就绪（壳调用 --ensure）
    ↓
-Edge --app 窗口（UI 层） —— 纯渲染，不管进程；兼容性零风险（Edge 内核 = 平时访问 GUI 的内核）
+原生壳（UI 层）          —— NSWindow + WKWebView；红叉=隐藏窗口（飞书式）、cookie 认证、文件选择/外链/下载
 ```
 
 纪律：**launchd 是唯一的进程拉起方**，launcher.sh 不允许再拉起（防双实例）。服务没跑时让 launchd 拉（`launchctl kickstart -k`；服务被 bootout 过则先 `bootstrap`），不要 nohup。
@@ -55,7 +62,8 @@ Edge --app 窗口（UI 层） —— 纯渲染，不管进程；兼容性零风�
 
 ```
 src/
-├── launcher.sh                    ← .app 启动入口
+├── DshApp.swift                   ← 原生壳（NSWindow + WKWebView；红叉→隐藏窗口、cookie、菜单）
+├── launcher.sh                    ← 服务就绪检查（.app 资源，壳调用 --ensure）
 ├── dsh-lib.sh                     ← 三脚本共享库（装到 ~/.dsh/lib/，自带自检）
 └── ai.dsh.web.plist               ← launchd 服务定义（模板，build.sh 渲染 @NODE@/@DSH@/@HOME@）
 build.sh                ← 组装 .app → ~/Applications + 装 launchd + 装 PATH 命令
@@ -71,6 +79,8 @@ docs/                              ← 单位电脑复刻手册等
 ## 常用命令
 
 ```bash
+open ~/Applications/dsh.app    # 打开原生窗口（服务没跑会自动拉起）
+tail -20 ~/.dsh/shell.log      # 壳自己的启动/连接日志（不含 cookie）
 dsh-restart        # 插件更新后重启服务（等 PID 换 + HTTP 就绪，最多 30s）
 dsh-kill           # 停服务（launchd bootout；下次登录仍会自启）
 bash src/dsh-lib.sh    # 共享库自检（不碰线上服务）
@@ -88,8 +98,8 @@ tail -20 ~/.dsh/web.err.log                  # 启动失败看这里
 |---|---|
 | dsh-desktop（★21.8k） | ❌ Electron 全家桶过重，进程管理/托盘/市场全是冗余 |
 | nativefier | ❌ 2023-09 已归档 |
-| Tauri / Swift 自研壳 | ❌ 暂不，收益只是换内核 |
-| **Edge --app + 进程层渐进（A→B）** | ✅ 窗口兼容性零风险；A/B 全解耦可逆，按使用频率演化 |
+| Tauri / Swift 自研壳 | ✅ 2026-10-19 采用 Swift + WKWebView：不是为了换内核，而是**只有自家 NSWindow 能把红叉改成「隐藏窗口」（飞书式）**；WebKit 渲染已实测 |
+| **Edge --app + 进程层渐进（A→B）** | ✅ 2026-08～10 使用；**2026-10-19 被原生壳取代**（红叉行为由 Chromium 写死，无法改） |
 | B 阶段曾暂缓（2026-08-30） | 当时判断「dsh 起步阶段求简单」。**该判断已被推翻**：服务后续实际由 launchd 托管（`ai.dsh.web`，2026-09 启用），仓库随之补齐 plist 与 launchd 感知脚本 |
-| Swift WKWebView 壳（②） | ❌ Safari 系内核对 Chromium 生态 GUI 有兼容风险，服务内存才是大头 |
+| Swift WKWebView 壳（②） | ✅ 2026-10-19 采用。原判「兼容风险」被实测推翻（页面/会话/WebSocket 正常）；「服务内存才是大头」仍成立——壳本体 <1MB |
 | API key 环境变量 | ✅ 无需注入：provider 的 `apiKeyEnv` 由 `~/.dsh/.credentials.yaml` 的 refs 解析，launchd 进程不依赖 shell 环境变量 |

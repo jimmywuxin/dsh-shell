@@ -1,6 +1,6 @@
 #!/bin/bash
 # dsh-shell 构建脚本
-#   1) 组装 .app → ~/Applications（launcher.sh + 图标 + Info.plist）
+#   1) 组装 .app → ~/Applications（Swift 原生壳 + launcher.sh + 图标 + Info.plist）
 #   2) 渲染并安装 launchd 服务（src/ai.dsh.web.plist → ~/Library/LaunchAgents/）
 #   3) 安装 dsh-restart / dsh-kill 到 ~/.npm-global/bin
 #
@@ -43,7 +43,7 @@ APP_VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true
 APP_BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
 [ -n "$APP_BUILD" ] || APP_BUILD=0
 
-# 日志权限兜底：web.log 里含带 token 的入口 URL（launcher 的 401 兜底要从这里抓），
+# 日志权限兜底：web.log 里记录了 dsh web 启动时打印的带 token 入口 URL，
 # 而 launchd 默认 umask 022 → 644，同机其他账户可读。plist 里的 Umask 要等
 # bootout/bootstrap 才生效，已有的两个日志需要当场收权限。幂等，缺文件不报错。
 chmod 600 "$HOME/.dsh/web.log" "$HOME/.dsh/web.err.log" 2>/dev/null || true
@@ -99,6 +99,15 @@ if [ ! -f "$DSH_JS" ]; then
 fi
 echo "dsh:  $DSH_JS"
 
+# 原生壳用 Swift 编译（2026-10-19 起，替代原「bash 脚本 exec Edge」的壳）。
+# -parse-as-library：源文件里有 @main，单文件编译默认按脚本模式处理会冲突。
+SWIFTC="/usr/bin/swiftc"
+if [ ! -x "$SWIFTC" ]; then
+  echo "错误：找不到 swiftc。需要 Command Line Tools：xcode-select --install" >&2
+  exit 1
+fi
+echo "swift: $("$SWIFTC" --version 2>/dev/null | head -1)"
+
 # ── 2) 图标：assets/icon_1024.png → AppIcon.icns ───────────
 mkdir -p "$BUILD_DIR"
 ICONSET="$(mktemp -d)/AppIcon.iconset"
@@ -123,8 +132,11 @@ iconutil -c icns "$ICONSET" -o "$ICNS"
 APP_NEW="$BUILD_DIR/dsh.app.new"
 rm -rf "$APP_NEW"
 mkdir -p "$APP_NEW/Contents/MacOS" "$APP_NEW/Contents/Resources"
-cp src/launcher.sh "$APP_NEW/Contents/MacOS/dsh"
-chmod +x "$APP_NEW/Contents/MacOS/dsh"
+# 原生壳：NSWindow + WKWebView。红叉→隐藏窗口（飞书式）、cookie 认证、文件选择/外链/下载
+# 都在 src/DshApp.swift 里；launcher.sh 只作为资源随包，负责把服务等到就绪。
+"$SWIFTC" -O -parse-as-library src/DshApp.swift -o "$APP_NEW/Contents/MacOS/dsh"
+cp src/launcher.sh "$APP_NEW/Contents/Resources/launcher.sh"
+chmod +x "$APP_NEW/Contents/Resources/launcher.sh"
 cp "$ICNS" "$APP_NEW/Contents/Resources/AppIcon.icns"
 cat > "$APP_NEW/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -139,10 +151,23 @@ cat > "$APP_NEW/Contents/Info.plist" <<EOF
   <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
   <key>CFBundleVersion</key><string>${APP_BUILD}</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <!-- 页面是 http://127.0.0.1:3080；ATS 对 loopback 仍要显式放行 -->
+    <key>NSAllowsLocalNetworking</key><true/>
+    <key>NSAllowsArbitraryLoads</key><true/>
+  </dict>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
 </dict>
 </plist>
 EOF
+
+# ad-hoc 签名：让 LaunchServices/WebKit 把它当普通 app 对待（WKWebView 的
+# WebContent 进程靠 XPC 拉起）。本机构建不走 Gatekeeper，签名失败只提示不中断。
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --sign - "$APP_NEW" >/dev/null 2>&1 \
+    || echo "警告：ad-hoc 签名失败（不影响本机运行）" >&2
+fi
 
 # 组装成功，现在才换掉旧产物
 if [ -d "$APP" ]; then
