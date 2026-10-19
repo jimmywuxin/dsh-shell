@@ -16,13 +16,9 @@
 
 ### 验证
 
-- `bash build.sh` 全流程通过，app 版本 1.2.0；`cmp` 确认 `build/AppIcon.icns` = `assets/AppIcon-black.icns` = app 内 `Contents/Resources/AppIcon.icns`
+- `bash build.sh` 全流程通过，app 版本 1.1.1；`cmp` 确认 `build/AppIcon.icns` = `assets/AppIcon-black.icns` = app 内 `Contents/Resources/AppIcon.icns`
 - `codesign -v` 通过（ad-hoc 重签）；`killall Dock` 后 Dock 显示新图标
 - 16/32/64/128/256/1024 逐档目视；浅色桌面与深色桌面各验一次；蓝版与黑版并排核对鲸鱼同形
-
-### 未做
-
-- **未建 GitHub Release**（按要求「不发版」），`release.sh` 未跑；后续补发版直接 `gh release create v1.1.1`，重跑 release.sh 会因 tag 已存在被拒
 
 ## v1.1.0 — 2026-10-19
 
