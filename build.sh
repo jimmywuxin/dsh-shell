@@ -108,13 +108,17 @@ if [ ! -x "$SWIFTC" ]; then
 fi
 echo "swift: $("$SWIFTC" --version 2>/dev/null | head -1)"
 
-# ── 2) 图标：assets/icon_1024.png → AppIcon.icns ───────────
+# ── 2) 图标：<ICON_SRC> → AppIcon.icns ─────────────────────
+#   2026-10-19 起采用黑色变体 A（黑鲸 + 浅瓷底）。三套变体共用同一套几何，
+#   换回蓝版只需把下面一行改成 assets/icon_1024.png（其他代码不用动）。
+ICON_SRC="assets/icon-black-1024.png"
+[ -f "$ICON_SRC" ] || { echo "错误：找不到图标母版 $ICON_SRC" >&2; exit 1; }
 mkdir -p "$BUILD_DIR"
 ICONSET="$(mktemp -d)/AppIcon.iconset"
 trap 'rm -rf "$(dirname "$ICONSET")"' EXIT
 mkdir -p "$ICONSET"
 for s in 16 32 64 128 256 512 1024; do
-  sips -z $s $s assets/icon_1024.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+  sips -z $s $s "$ICON_SRC" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
 done
 # @2x 命名规范（16/32/128/256/512 的两倍图）
 cp "$ICONSET/icon_32x32.png"     "$ICONSET/icon_16x16@2x.png"

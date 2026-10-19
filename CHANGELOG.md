@@ -2,6 +2,28 @@
 
 本项目的版本号按**功能里程碑**给，不按 commit 数给。修 bug 不升版本号。
 
+## v1.2.0 — 2026-10-19
+
+**动机**：v1 图标铺满 1024 画布、没有安全边距，在 Dock 里比系统图标大一圈；平色无层级、圆角也不是连续曲率。按 macOS Big Sur 之后的图标网格重做，并补一套黑色变体。
+
+### 改动
+
+- **新图标**：824×824 主体 + 100 px 边距 + 超椭圆 n=5；鲸鱼剪影沿用 v1（同一 alpha 遮罩，轮廓/眼睛/腹线未重绘），宽度占主体 62%，与 v1 视觉重量一致；四层深度＝落地阴影 / 渐变底 / 内阴影 / 冷边光
+- **三套变体共用几何**：蓝版（`assets/icon_1024.png`，原配色升级）、黑色 A（黑鲸 + 浅瓷底，**当前默认**）、黑色 B（白鲸 + 黑底）
+- **`build.sh` 增 `ICON_SRC`**，默认 `assets/icon-black-1024.png`；改这一行即切回蓝版
+- 新增 `assets/icon-src/`（调色板驱动的 `gen_icon.py`、三份 SVG 母版、鲸鱼遮罩、展示图脚本）、三份成品 `.icns`、纯黑 mark 与单色模板
+- 新增设计文档 `docs/icon-design-spec.md`：风格、配色、构图、调性、尺寸与平台规范、验收清单、黑色变体（§11）
+
+### 验证
+
+- `bash build.sh` 全流程通过，app 版本 1.2.0；`cmp` 确认 `build/AppIcon.icns` = `assets/AppIcon-black.icns` = app 内 `Contents/Resources/AppIcon.icns`
+- `codesign -v` 通过（ad-hoc 重签）；`killall Dock` 后 Dock 显示新图标
+- 16/32/64/128/256/1024 逐档目视；浅色桌面与深色桌面各验一次；蓝版与黑版并排核对鲸鱼同形
+
+### 未做
+
+- **未建 GitHub Release**（按要求「不发版」），`release.sh` 未跑；后续补发版直接 `gh release create v1.2.0`，重跑 release.sh 会因 tag 已存在被拒
+
 ## v1.1.0 — 2026-10-19
 
 **动机**：Edge `--app` 窗口的红叉由 Chromium 写死为「关闭窗口」，关掉最后一个窗口浏览器即退出，没有开关能改掉「关闭窗口」这个行为。改成原生 NSWindow + WKWebView 后，`windowShouldClose` 改为 `orderOut`：红叉隐藏窗口（飞书式，Dock 只留应用图标、不留缩略图），点 dock 图标恢复，应用与页面状态常驻。
