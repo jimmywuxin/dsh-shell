@@ -70,7 +70,7 @@ build.sh                ← 组装 .app → ~/Applications + 装 launchd + 装 P
 dsh-restart                        ← 重启服务（launchd: kickstart -k）
 dsh-kill                           ← 只停服务（launchd: bootout）
 assets/icon_1024.png               ← 应用图标源图
-docs/                              ← 单位电脑复刻手册等
+docs/                              ← 复刻手册、原生 WKWebView 壳改造指南（opencode-shell 参考）
 ```
 
 > **改任何一处共享逻辑，只改 `src/dsh-lib.sh`**——label、就绪判据、失效锁、启动兜底
