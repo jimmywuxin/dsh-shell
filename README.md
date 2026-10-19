@@ -88,7 +88,7 @@ launchctl print gui/$(id -u)/ai.dsh.web      # 查服务状态
 tail -20 ~/.dsh/web.err.log                  # 启动失败看这里
 ```
 
-安装产物位置（Jimmy 已确认的布局约定）：源码进 `~/dev`，构建产物才进 `~/Applications`。
+安装产物位置（本机约定）：源码进 `~/dev`，构建产物才进 `~/Applications`。
 
 **跑过 `dsh-kill` 后想恢复**：双击 `~/Applications/dsh.app`（launcher 会从 plist 重新 bootstrap），或跑 `dsh-restart`。两条路都会回到 launchd 托管态。
 
@@ -103,3 +103,11 @@ tail -20 ~/.dsh/web.err.log                  # 启动失败看这里
 | B 阶段曾暂缓（2026-08-30） | 当时判断「dsh 起步阶段求简单」。**该判断已被推翻**：服务后续实际由 launchd 托管（`ai.dsh.web`，2026-09 启用），仓库随之补齐 plist 与 launchd 感知脚本 |
 | Swift WKWebView 壳（②） | ✅ 2026-10-19 采用。原判「兼容风险」被实测推翻（页面/会话/WebSocket 正常）；「服务内存才是大头」仍成立——壳本体 <1MB |
 | API key 环境变量 | ✅ 无需注入：provider 的 `apiKeyEnv` 由 `~/.dsh/.credentials.yaml` 的 refs 解析，launchd 进程不依赖 shell 环境变量 |
+
+## 非官方声明
+
+个人自用项目，**不是 DSH 官方产物，与 DeepSeek 团队无任何关联**，也未获其背书。
+
+## License
+
+[MIT](LICENSE)
