@@ -2,8 +2,8 @@
 
 DSH Web GUI 的纯 UI 桌面壳：原生 WKWebView 窗口 + launchd 服务常驻。**不是 Electron，不是 dsh-desktop 那种全家桶**——只做「脱离浏览器」这一件事。
 
-> **权威设计文档**：`~/shared-memory/private/reba/2026-08-29_dsh_桌面端UI壳技术方案.md`
-> （含完整参考实现、前置核查、升级路径、验收清单——开发前必读）
+> **v1.1.0 起换壳**：`Edge --app` 已废弃，改为原生 Swift + WKWebView 壳（`src/DshApp.swift`）。
+> 改造细节见 `docs/原生WKWebView壳改造指南_2026-10-19.md`，选型过程见 `docs/替代方案调研.md`。
 
 ## 状态
 
