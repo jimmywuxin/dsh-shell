@@ -2,7 +2,7 @@
 
 本项目的版本号按**功能里程碑**给，不按 commit 数给。修 bug 不升版本号。
 
-## v1.2.0 — 2026-10-19
+## v1.1.1 — 2026-10-19
 
 **动机**：v1 图标铺满 1024 画布、没有安全边距，在 Dock 里比系统图标大一圈；平色无层级、圆角也不是连续曲率。按 macOS Big Sur 之后的图标网格重做，并补一套黑色变体。
 
@@ -22,7 +22,7 @@
 
 ### 未做
 
-- **未建 GitHub Release**（按要求「不发版」），`release.sh` 未跑；后续补发版直接 `gh release create v1.2.0`，重跑 release.sh 会因 tag 已存在被拒
+- **未建 GitHub Release**（按要求「不发版」），`release.sh` 未跑；后续补发版直接 `gh release create v1.1.1`，重跑 release.sh 会因 tag 已存在被拒
 
 ## v1.1.0 — 2026-10-19
 
