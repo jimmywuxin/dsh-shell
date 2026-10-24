@@ -22,6 +22,13 @@
   - Umask 63 = 0o077（2026-10-18 补）：web.log 里记录了带 token 的入口 URL（launcher
     靠它做 401 兜底），默认权限 644 意味着同机其他账户能读到 token、进而打开 loopback
     上的完整 GUI。收成 0600。
+  - ProgramArguments 指向 wrapper 而非直接 node（2026-10-24 补，见 src/dsh-launch.sh
+    头注释）：:3080 被孤儿 dsh 实例占住时，原来直接 node 的写法只会无限
+    `EADDRINUSE` 重试，堆出 19188 个 startup 日志（227MB）+ 19MB err.log，病因埋在
+    文件尾。wrapper 负责清孤儿、自轮转日志、清过期日志，再 exec 真正的服务。
+  - ThrottleInterval 60（2026-10-24 补）：默认 10s。KeepAlive=true 是无限重试，
+    不可自愈的故障（如端口被非 dsh 程序占用）下 10s 一轮就是刷屏。压到 60s，
+    用户按提示处理后重启一次即可，不必等日志爆。
 -->
 <plist version="1.0">
 <dict>
@@ -29,16 +36,15 @@
     <string>ai.dsh.web</string>
     <key>ProgramArguments</key>
     <array>
-        <string>@NODE@</string>
-        <string>@DSH@</string>
-        <string>--profile</string>
-        <string>web</string>
-        <string>--no-open</string>
+        <string>/bin/bash</string>
+        <string>@HOME@/.dsh/lib/dsh-launch.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
     <key>StandardOutPath</key>
     <string>@HOME@/.dsh/web.log</string>
     <key>StandardErrorPath</key>

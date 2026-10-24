@@ -266,3 +266,32 @@ install_file dsh-kill "$BIN_DIR/dsh-kill"
 # 共享库：三个脚本 source 它，必须存在，否则双击图标直接退出（launcher.sh 有前置检查）
 install_file src/dsh-lib.sh "$LIB_DST"
 echo "共享库：$LIB_DST"
+
+# ── 6) launchd 入口 wrapper（2026-10-24 加）──────────────────────────
+#   plist 的 ProgramArguments 指向它：先清掉占着 :3080 的孤儿 dsh 实例、轮转超大
+#   err.log、清理过期 startup 日志，再 exec 真正的服务进程。动因见
+#   src/dsh-launch.sh 头注释（一次 19188 个日志 / 227MB 的崩溃循环）。
+#
+#   渲染**不能复用上面那条 plist 的 sed**：那条只作用于 `<string>` 行，而 wrapper
+#   里的 @NODE@ / @DSH@ / @HOME@ 出现在 shell 变量赋值行（NODE_BIN="@NODE@"）。
+#   故单独一套全局替换。先落到 build/ 再用固定文件名安装 —— install_file 靠
+#   basename 命名备份，直接传 mktemp 产物会留下一串 tmp.XXXXXX 备份。
+LAUNCH_BUILT="$BUILD_DIR/dsh-launch.sh"
+sed -e "s|@NODE@|$NODE_BIN|g" \
+    -e "s|@DSH@|$DSH_JS|g" \
+    -e "s|@HOME@|$HOME|g" \
+    src/dsh-launch.sh > "$LAUNCH_BUILT"
+
+# 渲染后自检：变量名后紧跟非 ASCII 字符的写法，在 macOS 自带 bash 3.2 下会把 UTF-8
+# 首字节吞进变量名 → set -u 报「<乱码>: unbound variable」当场崩。2026-10-24 两次
+# 实踩，都崩在孤儿清理这条关键路径上。中文日志里一律写 ${VAR}。
+# 跳过注释行（`#` 开头）—— 头注释里为了说明这个坑会举反例，不能当成真代码报错。
+# 输出保持 ASCII（不用中文），免得 perl 未设 binmode 时打印乱码。
+if perl -CSD -ne 'next if /^\s*#/; if (/\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7F])/) { print "  line $.\n"; $f=1 } END { exit($f ? 0 : 1) }' "$LAUNCH_BUILT"; then
+  echo "错误：$LAUNCH_BUILT 里有变量名紧跟中文的写法（上面列出的行）。" >&2
+  echo "      bash 3.2 会把 UTF-8 字节吞进变量名导致 unbound variable，请改成 \${VAR}。" >&2
+  exit 1
+fi
+
+install_file "$LAUNCH_BUILT" "$HOME/.dsh/lib/dsh-launch.sh"
+echo "launchd 入口：$HOME/.dsh/lib/dsh-launch.sh"
