@@ -2,6 +2,26 @@
 
 本项目的版本号按**功能里程碑**给，不按 commit 数给。修 bug 不升版本号。
 
+## v1.2.0 — 2026-10-27
+
+**动机**：壳的顶端标题栏一直是系统材质灰白，压在 dsh 页面上像被切了一条横条；浅色下比页面白一点、深色下比页面亮一档，两种主题都对不上。要求是标题栏**跟着主界面底色变**，页面换主题时也跟着换。
+
+### 改动
+
+- **标题栏透明 + 窗口底色 = 页面实测底色**（`titlebarAppearsTransparent` + `window.backgroundColor`），不再是系统材质；`window.title` 与交通灯保留
+- 新增 **`chromeScript`**（WKUserScript，`atDocumentEnd`，主框架）实测底色：依次取 `body` → `#root` → `html` 第一个非透明 `backgroundColor`，经 `WKScriptMessageHandler("dshChrome")` 回传 `{rgb}`，原生 `applyChrome()` 上色
+- **三路触发，缺一路就会「页面变了、标题栏不变」**：MutationObserver（html/body 的 `class`/`style`/`data-ds-dark-theme`/`data-theme`，120ms 合并）＋ **500ms 轮询** `getComputedStyle`（页面不可见时跳过，JS 侧按 rgb 去重才回传）＋ 窗口重新激活时 `__dshChromeResample()` 强制重读
+- **appearance 只设在标题栏容器**（`standardWindowButton(.closeButton)?.superview?.superview`，即 `NSTitlebarContainerView`），**绝不设 `window.appearance`**：后者会下传到 WKWebView，把页面的 `prefers-color-scheme` 锁死（实测设成 `.aqua` 后页面 `matchMedia` 由 `dark` 变 `light`，等于壳反过来改页面）
+- 深色主题首帧竞态（属性已生效、底色未铺）采到纯白时，用兜底色 `#151517`，消除启动白闪
+- 连接/错误页（`loadMessagePage`）的 `<body>` 补 `data-ds-dark-theme`，连接阶段标题栏就是深色，不与深色主题错拍
+
+### 验证
+
+- 浅色主题：`shell.log` 记 `chrome: #FFFFFF`，截图确认标题栏与主内容同色、标题字与交通灯正常
+- 深色主题：系统切深色后页面转 `#151517`，标题栏 500ms 内跟上（旧版只靠 MutationObserver 时这条路会漏，靠窗口激活兜底才纠正——本次修复的就是它）
+- 启动序列复测：`chrome: #16171C`（连接页）→ `chrome: #151517`（主界面），无中间白帧
+- `window.appearance` 解耦后页面 `matchMedia` 恢复 `dark`；`bash build.sh` 全流程通过
+
 ## v1.1.1 — 2026-10-19
 
 **动机**：v1 图标铺满 1024 画布、没有安全边距，在 Dock 里比系统图标大一圈；平色无层级、圆角也不是连续曲率。按 macOS Big Sur 之后的图标网格重做，并补一套黑色变体。
