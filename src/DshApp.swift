@@ -40,12 +40,18 @@ private func base64URLDecode(_ value: String) -> Data? {
 // 做法是 titlebarAppearsTransparent + window.backgroundColor = 页面实测底色，
 // 标题栏区域就露出窗口底色，与内容严丝合缝；appearance 只负责交通灯/标题字明暗。
 //
-// 页面自己会切主题（body[data-ds-dark-theme]，机制见 dsh-web-frontend 的 CSS），
-// 壳在文档里挂 MutationObserver 监听该属性，变了就回读一次底色。
+// 怎么知道页面换了颜色 —— 三条路一起上，缺一条就会「页面变了、标题栏不变」：
+//   1) MutationObserver 盯 html/body 的 class/style/data-* —— 属性驱动的切换立刻响应；
+//   2) 500ms 轮询 getComputedStyle —— 2026-10-27 实测出现过页面已由白转深、属性没动、
+//      标题栏一直没跟上的情况（当时只有窗口重新激活时的兜底重采样才发现），轮询是抓
+//      这种「静默改色」唯一不依赖页面配合的办法；
+//   3) 窗口重新激活时原生喊一次 __dshChromeResample（顺手兜住睡醒/切空间）。
+// JS 侧对 rgb 值去重，只有真变了才回传，轮询不会把 IPC 打满。
 private let chromeScript = """
 (function () {
   if (window.__dshChromeHooked) return;
   window.__dshChromeHooked = true;
+  var lastKey = null;
   function rgbOf(el) {
     if (!el) return null;
     var m = (getComputedStyle(el).backgroundColor || '').match(/^rgba?\\(([^)]+)\\)$/);
@@ -56,28 +62,42 @@ private let chromeScript = """
     if (!(a > 0.5)) return null;              // 全透明 = 不是真正的底色，往下一层找
     return [Math.round(p[0]), Math.round(p[1]), Math.round(p[2])];
   }
-  function sample() {
+  function current() {
     var html = document.documentElement;
     var dark = !!document.body && (document.body.hasAttribute('data-ds-dark-theme')
       || html.hasAttribute('data-ds-dark-theme'));
     var chain = [document.body, document.getElementById('root'), html];
     var rgb = null;
     for (var i = 0; i < chain.length && !rgb; i++) rgb = rgbOf(chain[i]);
-    if (!rgb) rgb = dark ? [15, 17, 21] : [255, 255, 255];
-    try { window.webkit.messageHandlers.dshChrome.postMessage({ rgb: rgb, dark: dark }); } catch (e) {}
+    // 深色主题已生效但底色还没铺上（首帧竞态）：直接用深色兜底，别让标题栏先闪一帧白
+    if (dark && rgb && rgb[0] === 255 && rgb[1] === 255 && rgb[2] === 255) rgb = [21, 21, 23];
+    if (!rgb) rgb = dark ? [21, 21, 23] : [255, 255, 255];
+    return rgb;
   }
+  function sample() {
+    var rgb = current();
+    var key = rgb.join(',');
+    if (key === lastKey) return;              // 没变就别打扰原生
+    lastKey = key;
+    try { window.webkit.messageHandlers.dshChrome.postMessage({ rgb: rgb }); } catch (e) {}
+  }
+  function force() { lastKey = null; sample(); }
   var pending = null;
   function schedule() {
     if (pending) return;
     pending = setTimeout(function () { pending = null; sample(); }, 120);   // 合并同一帧内的多次突变
   }
   sample();
-  window.__dshChromeResample = sample;      // 窗口重新激活时原生会喊一次，兜住「系统外观切换」这类不改 DOM 的变暗
+  window.__dshChromeResample = force;         // 原生在窗口激活时调用，忽略去重强制重读
   try {
     var filter = { attributes: true, attributeFilter: ['class', 'style', 'data-ds-dark-theme', 'data-theme'] };
-    new MutationObserver(schedule).observe(html, filter);
+    new MutationObserver(schedule).observe(document.documentElement, filter);
     if (document.body) new MutationObserver(schedule).observe(document.body, filter);
   } catch (e) {}
+  setInterval(function () {
+    if (document.visibilityState !== 'visible') return;
+    sample();
+  }, 500);
 })();
 """
 
@@ -357,13 +377,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     // 底色 → 标题栏。window.backgroundColor 负责「颜色」，appearance 负责「交通灯和
     // 标题字的明暗」，两件事必须一起改：深底 + 浅色 appearance 会出现一排看不清的浅灰按钮。
+    //
+    // **appearance 只许设在标题栏容器上，不许设 window.appearance**：NSWindow 的
+    // appearance 会下传到 WKWebView，把页面的 prefers-color-scheme 锁死。2026-10-27
+    // 实测：设成 .aqua 后页面 matchMedia 从 dark 变 light（系统当时是深色）——dsh 的
+    // 主题来自 data-ds-theme-source，这种「壳反过来改页面」的污染比标题栏色差危险得多。
     private func applyChrome(_ color: NSColor) {
         guard let srgb = color.usingColorSpace(.sRGB), window != nil else { return }
         if let current = chromeColor, current == srgb { return }
         chromeColor = srgb
         window.backgroundColor = srgb
         let luma = 0.2126 * srgb.redComponent + 0.7152 * srgb.greenComponent + 0.0722 * srgb.blueComponent
-        window.appearance = NSAppearance(named: luma < 0.5 ? .darkAqua : .aqua)
+        // closeButton.superview² = NSTitlebarContainerView，只覆盖标题栏那一条
+        if let titlebar = window.standardWindowButton(.closeButton)?.superview?.superview {
+            titlebar.appearance = NSAppearance(named: luma < 0.5 ? .darkAqua : .aqua)
+        }
         shellLog(String(format: "chrome: #%02X%02X%02X", Int(srgb.redComponent * 255),
                         Int(srgb.greenComponent * 255), Int(srgb.blueComponent * 255)))
     }
