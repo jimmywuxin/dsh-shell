@@ -33,6 +33,54 @@ private func base64URLDecode(_ value: String) -> Data? {
     return Data(base64Encoded: string)
 }
 
+// 让标题栏跟着 dsh 主界面的底色走（2026-10-27 加）。
+//
+// 为什么不能只设 window.appearance：那只能把标题栏切成系统深色灰（#2C2C2E 一档），
+// 和 dsh 自己的 --dsw-alias-bg-base 对不上，深色下仍是一条明显不同的横条。
+// 做法是 titlebarAppearsTransparent + window.backgroundColor = 页面实测底色，
+// 标题栏区域就露出窗口底色，与内容严丝合缝；appearance 只负责交通灯/标题字明暗。
+//
+// 页面自己会切主题（body[data-ds-dark-theme]，机制见 dsh-web-frontend 的 CSS），
+// 壳在文档里挂 MutationObserver 监听该属性，变了就回读一次底色。
+private let chromeScript = """
+(function () {
+  if (window.__dshChromeHooked) return;
+  window.__dshChromeHooked = true;
+  function rgbOf(el) {
+    if (!el) return null;
+    var m = (getComputedStyle(el).backgroundColor || '').match(/^rgba?\\(([^)]+)\\)$/);
+    if (!m) return null;
+    var p = m[1].split(',').map(function (s) { return parseFloat(s); });
+    if (p.length < 3 || !isFinite(p[0])) return null;
+    var a = p.length > 3 ? p[3] : 1;
+    if (!(a > 0.5)) return null;              // 全透明 = 不是真正的底色，往下一层找
+    return [Math.round(p[0]), Math.round(p[1]), Math.round(p[2])];
+  }
+  function sample() {
+    var html = document.documentElement;
+    var dark = !!document.body && (document.body.hasAttribute('data-ds-dark-theme')
+      || html.hasAttribute('data-ds-dark-theme'));
+    var chain = [document.body, document.getElementById('root'), html];
+    var rgb = null;
+    for (var i = 0; i < chain.length && !rgb; i++) rgb = rgbOf(chain[i]);
+    if (!rgb) rgb = dark ? [15, 17, 21] : [255, 255, 255];
+    try { window.webkit.messageHandlers.dshChrome.postMessage({ rgb: rgb, dark: dark }); } catch (e) {}
+  }
+  var pending = null;
+  function schedule() {
+    if (pending) return;
+    pending = setTimeout(function () { pending = null; sample(); }, 120);   // 合并同一帧内的多次突变
+  }
+  sample();
+  window.__dshChromeResample = sample;      // 窗口重新激活时原生会喊一次，兜住「系统外观切换」这类不改 DOM 的变暗
+  try {
+    var filter = { attributes: true, attributeFilter: ['class', 'style', 'data-ds-dark-theme', 'data-theme'] };
+    new MutationObserver(schedule).observe(html, filter);
+    if (document.body) new MutationObserver(schedule).observe(document.body, filter);
+  } catch (e) {}
+})();
+"""
+
 private let logQueue = DispatchQueue(label: "com.jimmy.dsh-shell.log")
 
 private func shellLog(_ message: String) {
@@ -125,10 +173,12 @@ struct DshShell {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
-                         WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+                         WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate,
+                         WKScriptMessageHandler {
     private var window: NSWindow!
     private var webView: WKWebView!
     private var connecting = false
+    private var chromeColor: NSColor?
 
     // MARK: - 生命周期
 
@@ -153,6 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         guard window != nil else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
         if !window.isVisible { window.makeKeyAndOrderFront(nil) }
+        resampleChrome()   // 系统外观可能在这期间变过，页面不会主动通知
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
@@ -171,6 +222,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.preferences.isElementFullscreenEnabled = true
+        // 页面底色回传通道：脚本实测底色 → 原生给标题栏上色（见 chromeScript 注释）
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: chromeScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+        )
+        configuration.userContentController.add(self, name: "dshChrome")
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -189,6 +245,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         window.isRestorable = false
         window.tabbingMode = .disallowed
         window.delegate = self
+        // 标题栏透明 + 窗口底色 = 页面底色：页面加载前先用与连接页一致的深色，
+        // 加载完由 chromeScript 回传的真实底色覆盖。
+        window.titlebarAppearsTransparent = true
+        applyChrome(NSColor(srgbRed: 0.09, green: 0.094, blue: 0.11, alpha: 1))
         window.contentView = webView
         if !window.setFrameUsingName("dshMainWindow") { window.center() }
         window.setFrameAutosaveName("dshMainWindow")
@@ -281,7 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         div{max-width:560px;line-height:1.6}
         h1{font-size:16px;font-weight:600;margin:0 0 8px;color:#e6e7e9}
         p{margin:0;color:#9a9ba1}
-        </style></head><body><div><h1>\(escapedTitle)</h1>\(detailBlock)</div></body></html>
+        </style></head><body data-ds-dark-theme><div><h1>\(escapedTitle)</h1>\(detailBlock)</div></body></html>
         """
         webView.loadHTMLString(html, baseURL: nil)
     }
@@ -291,6 +351,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    // MARK: - 标题栏跟随页面底色
+
+    // 底色 → 标题栏。window.backgroundColor 负责「颜色」，appearance 负责「交通灯和
+    // 标题字的明暗」，两件事必须一起改：深底 + 浅色 appearance 会出现一排看不清的浅灰按钮。
+    private func applyChrome(_ color: NSColor) {
+        guard let srgb = color.usingColorSpace(.sRGB), window != nil else { return }
+        if let current = chromeColor, current == srgb { return }
+        chromeColor = srgb
+        window.backgroundColor = srgb
+        let luma = 0.2126 * srgb.redComponent + 0.7152 * srgb.greenComponent + 0.0722 * srgb.blueComponent
+        window.appearance = NSAppearance(named: luma < 0.5 ? .darkAqua : .aqua)
+        shellLog(String(format: "chrome: #%02X%02X%02X", Int(srgb.redComponent * 255),
+                        Int(srgb.greenComponent * 255), Int(srgb.blueComponent * 255)))
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "dshChrome",
+              let body = message.body as? [String: Any],
+              let rgb = body["rgb"] as? [Any], rgb.count == 3,
+              let r = (rgb[0] as? NSNumber)?.doubleValue,
+              let g = (rgb[1] as? NSNumber)?.doubleValue,
+              let b = (rgb[2] as? NSNumber)?.doubleValue else { return }
+        applyChrome(NSColor(srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: 1))
+    }
+
+    private func resampleChrome() {
+        webView.evaluateJavaScript("window.__dshChromeResample && window.__dshChromeResample()") { _, _ in }
     }
 
     // MARK: - 菜单
