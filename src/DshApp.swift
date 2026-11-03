@@ -105,11 +105,43 @@ private let chromeScript = """
 
 private let logQueue = DispatchQueue(label: "com.jimmy.dsh-shell.log")
 
+// 写日志前的兜底脱敏（对齐 opencode-shell 的 redactSecrets，模式按 dsh 的凭据面定制）。
+// dsh 的凭据面：带 token 的入口 URL（web.log 历史坑，err.log 堆栈里也可能带）、
+// 会话 cookie 值（v1.<body>.<mac>）、Authorization 头。任何写日志的路径
+// （含 ensure/restart 的脚本输出透传）都不允许原文落盘。
+// 抹写格式 = •••• + 尾 4 位指纹（安全铁律口径，指纹仅用于回溯是否同一凭据；
+// 值不足 8 字符时不带指纹，避免短值泄露比例过高）。
+private let redactPatterns: [NSRegularExpression] = [
+    // 1) 查询串/行内的凭据参数：token= secret= api_key= access_token=（含引号包裹值）
+    "((?:^|[?&;\\s\"'])(?i:token|secret|api_?key|access_?token)=[\"']?)([^&\\s\"']+)",
+    // 2) dsh 会话 cookie 的值
+    "((?i:dsh-auth-[A-Za-z0-9_-]+=))(v1\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+)",
+    // 3) Bearer 凭据（JWT 或 ≥24 字符的串）
+    "((?i:bearer[\"']?\\s*[:=]?\\s*))(eyJ[A-Za-z0-9._-]+|[A-Za-z0-9._-]{24,})",
+].compactMap { try? NSRegularExpression(pattern: $0) }
+
+private func redactSecrets(_ text: String) -> String {
+    var out = text
+    for regex in redactPatterns {
+        let ns = out as NSString
+        // 从后往前替换：前面的 range 不受影响
+        for m in regex.matches(in: out, range: NSRange(location: 0, length: ns.length)).reversed() {
+            guard m.numberOfRanges >= 3 else { continue }
+            let prefix = ns.substring(with: m.range(at: 1))
+            let value = ns.substring(with: m.range(at: 2))
+            let fingerprint = value.count >= 8 ? String(value.suffix(4)) : ""
+            out = ns.replacingCharacters(in: m.range, with: prefix + "••••" + fingerprint)
+        }
+    }
+    return out
+}
+
 private func shellLog(_ message: String) {
+    let sanitized = redactSecrets(message)
     logQueue.async {
         let fileManager = FileManager.default
         let path = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".dsh/shell.log")
-        let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
+        let line = "\(ISO8601DateFormatter().string(from: Date())) \(sanitized)\n"
         guard let data = line.data(using: .utf8) else { return }
         if !fileManager.fileExists(atPath: path.path) {
             fileManager.createFile(atPath: path.path, contents: nil, attributes: [.posixPermissions: 0o600])
