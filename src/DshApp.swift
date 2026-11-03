@@ -417,8 +417,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if window.isMiniaturized { window.deminiaturize(nil) }
-        window.makeKeyAndOrderFront(nil)
-        activateApp()
+        if window.isVisible {
+            window.makeKeyAndOrderFront(nil)
+            activateApp()
+        } else {
+            // 红叉隐藏期间可能升级过 dsh：恢复 = 先校验服务新鲜度（2026-11-04，
+            // 移植 opencode-shell 的 reopenRefreshingService 模式）
+            reopenRefreshingService()
+        }
         return true
     }
 
@@ -426,8 +432,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func applicationDidBecomeActive(_ notification: Notification) {
         guard window != nil else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
-        if !window.isVisible { window.makeKeyAndOrderFront(nil) }
+        if !window.isVisible {
+            reopenRefreshingService()
+            return
+        }
         resampleChrome()   // 系统外观可能在这期间变过，页面不会主动通知
+    }
+
+    // 从隐藏状态恢复：跑 launcher --ensure 顺带做升级自检（旧服务会被 kickstart
+    // 换血，stderr 打 refreshed=1）。换血过 → 全量 connect 重连拿新前端；
+    // 没换 → 窗口已在上面拉回，页面状态（输入中的内容/滚动位置）原样保留。
+    // reopen 与 didBecomeActive 点图标时常常连发，靠 freshnessCheckInFlight 去重，
+    // 防两次 ensure 并发（第二次会在半启动窗口里 kickstart -k 杀掉刚拉起的实例）。
+    private var freshnessCheckInFlight = false
+    private func reopenRefreshingService() {
+        showMainWindow(nil)
+        guard !connecting, !freshnessCheckInFlight else { return }
+        guard let script = Bundle.main.url(forResource: "launcher", withExtension: "sh") else { return }
+        freshnessCheckInFlight = true
+        shellLog("reopen: checking service freshness")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = runScriptSync(script.path, ["--ensure"])
+            let refreshed = result.output.contains("refreshed=1")
+            shellLog("reopen: ensure exit=\(result.status) refreshed=\(refreshed)\(result.output.isEmpty ? "" : " output=\(result.output)")")
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.freshnessCheckInFlight = false
+                if refreshed {
+                    shellLog("reopen: service was refreshed, reconnecting")
+                    self.connect()
+                }
+            }
+        }
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }

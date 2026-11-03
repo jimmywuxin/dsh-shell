@@ -2,6 +2,24 @@
 
 本项目的版本号按**功能里程碑**给，不按 commit 数给。修 bug 不升版本号。
 
+## v1.5.0 — 2026-11-04
+
+**取长补短**：对照 opencode-shell v1.2.2（Jimmy 同日手修的同病灶）互查，移植其「隐藏恢复换血」，并修掉 v1.4.0 实测带病的一处静默失效。
+
+### 改动
+
+- **红叉隐藏恢复也做升级自检**（移植 opencode-shell 的 `reopenRefreshingService` 模式）：点 Dock 图标恢复隐藏窗口时先跑 `launcher --ensure`（内含升级自检），stderr 带 `refreshed=1` 标记 → 壳据此全量 `connect()` 重连拿新前端；没换血则只拉回窗口，页面状态（输入中的内容/滚动位置）原样保留。修复「隐藏期间升级 dsh、恢复后仍看旧页面」的盲区
+  - `launcher.sh`：换血成功后 stderr 打机器可读标记 `refreshed=1`（与 `--ensure` 的 stdout 无契约冲突）
+  - `DshApp.swift`：`applicationShouldHandleReopen` / `applicationDidBecomeActive` 在窗口隐藏态走 `reopenRefreshingService()`；`freshnessCheckInFlight` 去重——reopen 与 didBecomeActive 点图标时常连发，两次 ensure 并发会在半启动窗口里 kickstart -k 杀掉刚拉起的实例
+- **修 v1.4.0 的八进制 bug**：bash 把 etime 的 `08`/`09` 当八进制，`$((…))` 报 `value too great for base` → `service_start_epoch` 失败 → 升级自检**静默跳过**（约两成时间窗失效，00:44 实测抓到）。解析后统一 `10#` 强制十进制
+
+### 验证
+
+- 端到端（app 上下文）：touch bin.js 模拟升级 → 重开 app → 服务 pid 6214→8186 自动重启，`refreshed=1` 标记出现在 ensure 输出中
+- 未升级重开：pid 不变，ensure 干净 exit 0（快路径）
+- octal 单测：`m=09 s=07` → 547（修复前该场景直接报 base error）
+- `swiftc -typecheck`、`bash build.sh` 通过
+
 ## v1.4.0 — 2026-11-04
 
 **动机**：`npm -g` 升级 dsh 后，常驻的旧 node 进程仍揣着旧代码跑，而 launcher.sh 一看服务就绪就直接成功——「退出 app 重开」永远显示旧版本，必须去终端跑 `dsh-restart`（opencode-shell 同款病灶）。要求：重开 app 即自动加载新版本。

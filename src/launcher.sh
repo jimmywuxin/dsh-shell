@@ -48,6 +48,9 @@ service_start_epoch() {
     *) return 1 ;;
   esac
   case "${d}${h}${m}${s}" in ''|*[!0-9]*) return 1 ;; esac
+  # 10# 强制十进制：bash 把 08/09 当八进制，$((…09…)) 直接报
+  # 「value too great for base」，自检静默失效（2026-11-04 实测，v1.4.0 带病）
+  d=$((10#$d)); h=$((10#$h)); m=$((10#$m)); s=$((10#$s))
   now="$(date +%s)"
   total=$(( ((d * 24 + h) * 60 + m) * 60 + s ))
   printf '%s' "$(( now - total ))"
@@ -74,6 +77,9 @@ refresh_if_upgraded() {
   launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null 2>&1 || return 1
   if wait_ready >/dev/null; then
     echo "dsh web 已重启（pid $(pid_of)），新版本生效"
+    # 机器可读标记（移植 opencode-shell 的契约）：壳的「隐藏恢复」路径据此
+    # 决定是否全量重连。走 stderr，与 launcher --ensure 的 stdout 无契约冲突。
+    echo "refreshed=1" >&2
     return 0
   fi
   notify "dsh 升级后重启服务，30 秒未就绪，请查看 $LOG_DIR/web.err.log"
