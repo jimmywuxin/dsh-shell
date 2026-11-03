@@ -13,6 +13,11 @@
 # 保留的只有「服务怎么起来、怎么等就绪」——这段踩过 kickstart 半启动、
 # bootout 后无法恢复、launchctl print 残留假阳性等多次坑，且与 dsh-restart
 # 共用 dsh-lib.sh 里的判据，不能在这里重写一份。
+#
+# 2026-11-04 加「升级自检」：npm -g 升级 dsh 后，常驻的旧 node 进程仍揣着旧代码，
+# 而 ensure 一看服务就绪就 exit 0 →「退出 app 重开」永远看到旧版本，必须去终端跑
+# dsh-restart（opencode-shell 同款病灶）。现比对 dsh 入口文件 mtime 与服务进程
+# 运行时长：文件比进程新 = 升级过 → kickstart -k 重启，重开 app 即等效 dsh-restart。
 set -u
 
 LIB="$HOME/.dsh/lib/dsh-lib.sh"
@@ -25,8 +30,61 @@ fi
 
 notify() { osascript -e "display notification \"$1\" with title \"DSH\"" >/dev/null 2>&1; }
 
-# 1) 已在跑且就绪 → 直接成功（常见路径：launchd 常驻，开机即在）
-if app_ready; then exit 0; fi
+# ── 升级自检（2026-11-04）────────────────────────────────────
+# 服务进程的启动时刻（epoch）：运行时长来自 ps etime（locale 无关，纯时长）。
+# 注意：ps 在 WorkBuddy 的沙箱 shell 里会被拒（operation not permitted）——但
+# launcher 只由 .app（LaunchServices 拉起，无沙箱）调用，ps 正常。
+service_start_epoch() {
+  local pid="$1" etime rest d=0 h=0 m=0 s=0 now total
+  [ -n "$pid" ] || return 1
+  etime="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$etime" ] || return 1
+  # etime 形态：MM:SS / HH:MM:SS / D-HH:MM:SS（D 可为多天）
+  rest="$etime"
+  case "$rest" in *-*) d="${rest%%-*}"; rest="${rest#*-}" ;; esac
+  case "$rest" in
+    *:*:*) h="${rest%%:*}"; rest="${rest#*:}"; m="${rest%%:*}"; s="${rest##*:}" ;;
+    *:*)   m="${rest%%:*}"; s="${rest##*:}" ;;
+    *) return 1 ;;
+  esac
+  case "${d}${h}${m}${s}" in ''|*[!0-9]*) return 1 ;; esac
+  now="$(date +%s)"
+  total=$(( ((d * 24 + h) * 60 + m) * 60 + s ))
+  printf '%s' "$(( now - total ))"
+}
+
+# 升级过就重启；返回 0 = 已刷新或无需刷新，返回非 0 = 想重启但 kickstart 失败
+# （此时保留旧版本继续可用，不打断开 app 流程）。
+refresh_if_upgraded() {
+  launchd_managed || return 0
+  local pid start entry mtime
+  pid="$(pid_of)"
+  [ -n "$pid" ] || return 0
+  start="$(service_start_epoch "$pid")" || return 0
+  # 入口文件取进程 argv 里的真实 bin.js 路径（旧进程实际加载的那个）。
+  # 不能 stat $DSH_BIN：macOS 的 stat 默认**不跟软链**，拿到的是 npm 软链自己的
+  # mtime（链接创建时间），升级后也不会变 —— 2026-11-04 实测踩坑。
+  entry="$(ps -o command= -p "$pid" 2>/dev/null | awk '{print $2}')"
+  case "$entry" in /*) [ -f "$entry" ] || return 0 ;; *) return 0 ;; esac
+  mtime="$(stat -f %m "$entry" 2>/dev/null)" || return 0
+  case "$mtime" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$mtime" -gt "$start" ] || return 0
+  echo "dsh 已升级（入口文件比服务进程新），重启服务加载新版本…" >&2
+  reap_stale_lock   # kickstart -k 前必修课：强杀会留失效锁 → 崩溃循环（dsh-lib.sh 注）
+  launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null 2>&1 || return 1
+  if wait_ready >/dev/null; then
+    echo "dsh web 已重启（pid $(pid_of)），新版本生效"
+    return 0
+  fi
+  notify "dsh 升级后重启服务，30 秒未就绪，请查看 $LOG_DIR/web.err.log"
+  exit 1
+}
+
+# 1) 已在跑且就绪 → 升级自检（升级过就重启加载新版本），否则直接成功
+if app_ready; then
+  refresh_if_upgraded
+  exit 0
+fi
 
 # 2) 未就绪：先清失效锁（开机后半启动窗口内误 kickstart 会留下 credentials
 #    writer lock，见 dsh-lib.sh 头注释），再交给 launchd 拉起。

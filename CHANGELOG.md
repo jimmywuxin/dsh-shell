@@ -2,6 +2,23 @@
 
 本项目的版本号按**功能里程碑**给，不按 commit 数给。修 bug 不升版本号。
 
+## v1.4.0 — 2026-11-04
+
+**动机**：`npm -g` 升级 dsh 后，常驻的旧 node 进程仍揣着旧代码跑，而 launcher.sh 一看服务就绪就直接成功——「退出 app 重开」永远显示旧版本，必须去终端跑 `dsh-restart`（opencode-shell 同款病灶）。要求：重开 app 即自动加载新版本。
+
+### 改动
+
+- **launcher.sh 升级自检**：服务已就绪时，比对入口文件 mtime 与服务进程启动时刻（ps etime 反推，locale 无关）——文件比进程新 = 升级过 → `reap_stale_lock` + `kickstart -k` 重启并 `wait_ready`，等效替用户跑了 `dsh-restart`
+- 入口文件取**进程 argv 里的真实 bin.js 路径**，不 stat `$DSH_BIN`：macOS 的 `stat` 默认**不跟软链**，拿到的是 npm 软链自身的 mtime（链接创建时间），升级后不会变（2026-11-04 实测踩坑）
+- 判据任何一步拿不到数据（ps 不可用等）一律跳过刷新：宁可开到旧版，不误判重启；kickstart 失败同样放行旧版本
+- 未升级时走原快路径（exit 0），开 app 零额外耗时
+
+### 验证
+
+- 端到端：touch bin.js 模拟升级 → 重开 app → 服务 pid 907→6214 自动重启，ensure 输出「dsh 已升级…」，全程约 4s
+- 二次打开（未升级）：pid 不变，ensure 干净 exit 0，走快路径
+- `bash -n`、etime 解析单测（MM:SS / HH:MM:SS / D-HH:MM:SS / garbage）通过
+
 ## v1.3.1 — 2026-11-03
 
 **动机**：shell.log 是壳的排障主入口，有三处卫生问题：写日志的路径没有兜底脱敏（token/cookie 值可能原文落盘，opencode-shell 有 redactSecrets 而 dsh 裸奔）、时间戳是 UTC（排障要心算 8 小时，2026-11-03 实踩）、没有轮转（常驻进程会无限堆）。
