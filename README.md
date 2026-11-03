@@ -104,6 +104,16 @@ tail -20 ~/.dsh/web.err.log                  # 启动失败看这里
 | Swift WKWebView 壳（②） | ✅ 2026-10-19 采用。原判「兼容风险」被实测推翻（页面/会话/WebSocket 正常）；「服务内存才是大头」仍成立——壳本体 <1MB |
 | API key 环境变量 | ✅ 无需注入：provider 的 `apiKeyEnv` 由 `~/.dsh/.credentials.yaml` 的 refs 解析，launchd 进程不依赖 shell 环境变量 |
 
+## 换机 / 分发（ad-hoc 签名）
+
+`build.sh` 用 `codesign --sign -`（ad-hoc）签壳，本机自用没问题；**拷给别人，或重装系统后从备份恢复**时，首次打开会被 Gatekeeper 拦（提示「无法验证开发者」，或直接说「已损坏」——包其实没坏）。放行一次即可：
+
+```bash
+xattr -dr com.apple.quarantine ~/Applications/dsh.app
+```
+
+仍被拦就去「系统设置 → 隐私与安全性」底部点「仍要打开」。想免掉这一步需要 Developer ID 签名 + notarize，本项目暂无开发者账号。
+
 ## 非官方声明
 
 个人自用项目，**不是 DSH 官方产物，与 DeepSeek 团队无任何关联**，也未获其背书。

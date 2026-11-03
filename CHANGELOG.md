@@ -2,6 +2,30 @@
 
 本项目的版本号按**功能里程碑**给，不按 commit 数给。修 bug 不升版本号。
 
+## v1.3.0 — 2026-11-03
+
+**动机**：对照 LibreTV-shell / opencode-shell 横向审查（`docs/改进清单_2026-11-03.md`）补壳的韧性：内容进程崩溃会永久白屏、全屏退出会搞乱标题栏、cookie 30 天过期后只能手动重连救。顺手把日常排障搬进壳里，服务卡住不必再开终端。
+
+### 改动
+
+- **内容进程崩溃自愈（P0-1）**：新增 `webViewWebContentProcessDidTerminate` → 自动 `reload()`（保 cookie）；5 秒内超过 2 次转「页面进程反复崩溃」错误页，防必崩页面无限刷日志
+- **标题栏几何自愈（P0-2）**：WKWebView 改由 NSView 容器承载（autoresizingMask），不再直接当 contentView；移植 LibreTV-shell 的四件套（健康基线 / 几何判据 / 调度 / 四步递进修复：复位 styleMask → frame 微调 1pt → 翻转 .titled → 刷新透明标题栏），挂全屏进出 / resize / becomeKey；修复后强制重贴底色，保住 v1.2.0 的「标题栏跟随页面底色」
+- **loopback 等价类（P0-3）**：`127.0.0.1` / `localhost` / `::1` 同端口都算本机（host 去 `[]`），服务端 302 落到 localhost 不再被当外链甩给浏览器；两处重复判定合并为一个 `isLocal()`
+- **⌘R / ⇧⌘R 分流（P1-1）**：⌘R 只刷页面（快路径，保 cookie 与会话）；⇧⌘R 才重跑 ensure + 重铸 cookie；菜单拆「重新载入 / 重新连接」
+- **排障菜单（P1-2）**：视图菜单新增「重启服务」（跑 `~/.npm-global/bin/dsh-restart` 后自动重连）、「打开壳日志 / 打开服务日志」、「服务状态」（launcher --ensure 退出码 + HTTP 码，401/2xx/3xx 为就绪）
+- **401 自动重铸（P1-3）**：主框架 401 时重铸 cookie 并 reload，单次配额防死循环；日志区分 `auth: re-minted after 401` 与 `auth: 401 and re-mint failed (reason=…)`
+- **凭据解析诊断（P1-4）**：失败分五种原因（文件不存在 / 读不出 / 无 browser-session 段 / 无 secret: / 解码后不是 32 字节），写进错误页与日志（只记 reason 不记值）；文件权限非 0600 告警一次
+- **README** 补「换机 / 分发（ad-hoc 签名）」：Gatekeeper 拦截时的 `xattr` 放行步骤（P2-3）
+- 收录 `docs/改进清单_2026-11-03.md`（三壳横向审查来源与 P2 待办）
+
+### 验证
+
+- `kill -9` WebKit WebContent 进程 → 1s 内自动重载回页面，`shell.log` 出现 `web content process terminated: reloading`，内容进程换新 pid
+- ⌘R 日志 `reload:`；⇧⌘R 日志 `connect: ensuring service` → `ensure: exit=0` → `loaded`（注意 shell.log 时间戳为 UTC）
+- ⌃⌘F 全屏进出：窗口 frame 自动恢复、无 `titlebar broken`
+- 菜单「服务状态」：`status: ensure=0 http=401`，弹窗报「就绪」
+- `swiftc -typecheck`、`bash build.sh`、`bash src/dsh-lib.sh` selftest 全通过
+
 ## v1.2.0 — 2026-10-27
 
 **动机**：壳的顶端标题栏一直是系统材质灰白，压在 dsh 页面上像被切了一条横条；浅色下比页面白一点、深色下比页面亮一档，两种主题都对不上。要求是标题栏**跟着主界面底色变**，页面换主题时也跟着换。

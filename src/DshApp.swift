@@ -8,12 +8,14 @@ import CryptoKit
 // 关闭最后一个窗口即退出浏览器，没有任何开关能改。只有自家 NSWindow
 // 才能改掉 windowShouldClose 的默认行为。
 //
-// 壳只做三件事：
+// 壳只做四件事：
 //   1) 调 bundle 里的 launcher.sh --ensure 把 launchd 服务等到就绪；
 //   2) 用 ~/.dsh/.credentials.yaml 里的 browser-session 签名密钥现场 mint
 //      一个 dsh web 的会话 cookie（服务端规则见 @deepseek-ai/dsh-client-connection）；
 //   3) 用 WKWebView 打开 http://127.0.0.1:3080；红叉/⌘W 隐藏窗口（只留 Dock
-//      图标，像飞书，不生成缩略图），点 Dock 图标恢复。
+//      图标，像飞书，不生成缩略图），点 Dock 图标恢复；
+//   4) 自愈与排障：内容进程崩溃后自动重载、401 自动重铸 cookie、全屏退出的
+//      标题栏错位自修，以及「视图」菜单里的重启服务/看日志/查状态。
 //
 // 运行时日志（不含 cookie/token）追加到 ~/.dsh/shell.log。
 
@@ -119,18 +121,56 @@ private func shellLog(_ message: String) {
     }
 }
 
+// 凭据文件的解析失败原因。
+// 为什么要把 nil 拆成五种（2026-11-03）：原来扫描失败只有一句「请确认 DSH 启动过」，
+// 而真实情况常常是 dsh 好好跑着、只是文件格式/权限变了 —— 误导诊断比没有诊断更糟。
+// 只记原因不记值（secret 本身绝不落日志）。
+private enum SecretProblem: String {
+    case fileMissing = "file-missing"
+    case unreadable = "unreadable"
+    case noBlock = "no-block"
+    case noSecret = "no-secret"
+    case badLength = "bad-length"
+
+    var hint: String {
+        switch self {
+        case .fileMissing:
+            return "~/.dsh/.credentials.yaml 不存在。请确认 DSH 至少启动过一次。"
+        case .unreadable:
+            return "~/.dsh/.credentials.yaml 存在但读不出来（检查文件权限与编码）。"
+        case .noBlock:
+            return "文件里找不到 client-connection/browser-session 段，凭据格式可能已变。"
+        case .noSecret:
+            return "browser-session 段里没有 secret: 一行，凭据文件可能不完整。"
+        case .badLength:
+            return "secret 解码后不是 32 字节，凭据文件可能被截断。"
+        }
+    }
+}
+
+private struct SecretLookup {
+    let value: String?
+    let problem: SecretProblem?
+}
+
 // 从凭据文件里取 client-connection/browser-session 的签名密钥。
-// 只做最小 YAML 扫描：这段结构由 dsh-credentials 固定写出（key 缩进 2、
-// secret 缩进 6），不引第三方 YAML 解析器。
-private func browserSessionSecret() -> String? {
+// 只做最小 YAML 扫描：这段结构由 dsh-credentials 固定写出，不引第三方 YAML 解析器。
+// secret: 的缩进不参与判定（只按「块内出现 secret:」匹配），块外靠 indent <= 2 收束。
+private func browserSessionSecret() -> SecretLookup {
     let path = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".dsh/.credentials.yaml")
-    guard let text = try? String(contentsOf: path, encoding: .utf8) else { return nil }
+    guard let text = try? String(contentsOf: path, encoding: .utf8) else {
+        let exists = FileManager.default.fileExists(atPath: path.path)
+        return SecretLookup(value: nil, problem: exists ? .unreadable : .fileMissing)
+    }
+    warnIfSecretPermissionsLoose(path)
     var inBlock = false
+    var sawBlock = false
     for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
         let line = String(rawLine)
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         if trimmed == "client-connection/browser-session:" {
             inBlock = true
+            sawBlock = true
             continue
         }
         guard inBlock else { continue }
@@ -138,23 +178,62 @@ private func browserSessionSecret() -> String? {
             let value = trimmed.dropFirst("secret:".count)
                 .trimmingCharacters(in: .whitespaces)
                 .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            return value.isEmpty ? nil : value
+            return value.isEmpty
+                ? SecretLookup(value: nil, problem: .noSecret)
+                : SecretLookup(value: value, problem: nil)
         }
         let indent = line.prefix(while: { $0 == " " }).count
         if !trimmed.isEmpty && indent <= 2 { inBlock = false }
     }
-    return nil
+    return SecretLookup(value: nil, problem: sawBlock ? .noSecret : .noBlock)
+}
+
+// 密钥文件权限收得太松时警告一次（不阻断）：同机其他账户可读 = 可自行造 cookie。
+private var warnedLooseSecretPermissions = false
+
+private func warnIfSecretPermissionsLoose(_ path: URL) {
+    guard !warnedLooseSecretPermissions else { return }
+    let attrs = try? FileManager.default.attributesOfItem(atPath: path.path)
+    let mode = (attrs?[.posixPermissions] as? NSNumber)?.intValue ?? 0
+    guard mode & 0o077 != 0 else { return }
+    warnedLooseSecretPermissions = true
+    shellLog(String(format: "auth: credentials permissions too open (mode=0%o), expect 0600", mode))
+}
+
+// mint 失败的两类原因：凭据侧（带具体原因，给用户看）与编码侧（几乎不可能，只记日志）。
+private enum MintFailure: Error {
+    case secret(SecretProblem)
+    case encoding
+
+    var logReason: String {
+        switch self {
+        case .secret(let problem): return problem.rawValue
+        case .encoding: return "encode"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .secret(let problem): return problem.hint
+        case .encoding: return "签名密钥可用，但 cookie 编码失败（少见，多为内存异常）。"
+        }
+    }
 }
 
 // mint 一个服务端认可的浏览器会话 cookie：
 //   name  = dsh-auth-<base64url(sha256(authority))>
 //   value = v1.<base64url(JSON payload)>.<base64url(HMAC-SHA256(secret, body))>
 // authority 对 http 是 host:port（与 dsh-client-connection 的 requestAudience 一致）。
-private func mintAuthCookie(for url: URL) -> HTTPCookie? {
-    guard let host = url.host,
-          let secretString = browserSessionSecret(),
-          let secret = base64URLDecode(secretString),
-          secret.count == 32 else { return nil }
+private func mintAuthCookie(for url: URL) -> Result<HTTPCookie, MintFailure> {
+    guard let host = url.host else { return .failure(.encoding) }
+    let lookup = browserSessionSecret()
+    guard let secretString = lookup.value else {
+        return .failure(.secret(lookup.problem ?? .noSecret))
+    }
+    guard let secret = base64URLDecode(secretString) else {
+        return .failure(.secret(.badLength))
+    }
+    guard secret.count == 32 else { return .failure(.secret(.badLength)) }
 
     let authority = url.port.map { "\(host):\($0)" } ?? host
     let name = "dsh-auth-" + base64URL(Data(SHA256.hash(data: Data(authority.utf8))))
@@ -166,7 +245,9 @@ private func mintAuthCookie(for url: URL) -> HTTPCookie? {
         "issuedAt": now,
         "expiresAt": now + lifetime,
     ]
-    guard let json = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return nil }
+    guard let json = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+        return .failure(.encoding)
+    }
     let body = base64URL(json)
     let mac = HMAC<SHA256>.authenticationCode(for: Data(body.utf8), using: SymmetricKey(data: secret))
     let value = "v1.\(body).\(base64URL(Data(mac)))"
@@ -177,7 +258,61 @@ private func mintAuthCookie(for url: URL) -> HTTPCookie? {
         .path: "/",
         .expires: Date(timeIntervalSince1970: Double(now + lifetime) / 1000),
     ]
-    return HTTPCookie(properties: properties)
+    guard let cookie = HTTPCookie(properties: properties) else { return .failure(.encoding) }
+    return .success(cookie)
+}
+
+// 本机等价类（2026-11-03）：loopback 的三个写法必须都认。原来只比字符串
+// "127.0.0.1"，服务端任何一次 302 落到 localhost 就会被当外链交给 NSWorkspace
+// —— 现场表现是「壳突然空白、浏览器被拉起来」，排障时极易误判成服务挂了。
+private let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "::1"]
+
+private func isLocal(_ url: URL) -> Bool {
+    guard let rawHost = url.host?.lowercased() else { return false }
+    let host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+    guard loopbackHosts.contains(host) else { return false }
+    return (url.port ?? 80) == (dshURL.port ?? 80)
+}
+
+// ── 子进程与探活（启动等待与「视图」菜单的排障入口共用） ───────────
+// 同步执行，**只在后台队列调用**：waitUntilExit 会阻塞调用线程。
+private func runProcessSync(_ executable: String, _ arguments: [String]) -> (status: Int32, output: String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = pipe
+    do {
+        try process.run()
+    } catch {
+        return (-1, "启动失败：\(error.localizedDescription)")
+    }
+    process.waitUntilExit()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    return (process.terminationStatus,
+            String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+}
+
+private func runScriptSync(_ path: String, _ arguments: [String]) -> (status: Int32, output: String) {
+    runProcessSync("/bin/bash", [path] + arguments)
+}
+
+// 与 dsh-lib.sh 的 app_ready 同口径：401（认证墙后面是活服务）/2xx/3xx 就绪，
+// 000（没起）/404（半启动）/5xx 都不算。
+private func isReadyCode(_ code: String) -> Bool {
+    if code.isEmpty || code == "000" || code == "404" { return false }
+    if code.hasPrefix("5") { return false }
+    return true
+}
+
+private func probeHTTPCode() -> String {
+    let result = runProcessSync("/usr/bin/curl", [
+        "-s", "-o", "/dev/null", "-w", "%{http_code}",
+        "--noproxy", "*", "--max-time", "2", dshURL.absoluteString,
+    ])
+    let code = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+    return code.isEmpty ? "000" : code
 }
 
 private let appDelegate = AppDelegate()
@@ -199,6 +334,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var webView: WKWebView!
     private var connecting = false
     private var chromeColor: NSColor?
+
+    // 基础样式掩码：全屏自愈时按它复位（WebKit 全屏常残留 .fullSizeContentView）
+    private let baseStyleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
+    // 标题栏自愈用：健康基线、待执行的修复、冷却与重试计数
+    private var healthyCloseCenter: NSPoint?
+    private var pendingRepair: DispatchWorkItem?
+    private var repairing = false
+    private var repairAttempts = 0
+    private var lastRepairAt = Date.distantPast
+    private var savedFrameBeforeFullScreen: NSRect?
+    // 内容进程崩溃重载的冷却窗口（5s 内最多 2 次，防止必崩页面无限刷）
+    private var crashReloadCount = 0
+    private var lastCrashReloadAt = Date.distantPast
+    // 401 重铸配额：一次导航只重铸一次，避免凭证真失效时死循环
+    private var authRepairAttempted = false
 
     // MARK: - 生命周期
 
@@ -255,7 +405,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 860),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: baseStyleMask,
             backing: .buffered,
             defer: false
         )
@@ -269,11 +419,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // 加载完由 chromeScript 回传的真实底色覆盖。
         window.titlebarAppearsTransparent = true
         applyChrome(NSColor(srgbRed: 0.09, green: 0.094, blue: 0.11, alpha: 1))
-        window.contentView = webView
+        // 用普通容器承载 WKWebView，而不是让 webView 直接当 contentView（2026-11-03）：
+        // 直接当的话，WebKit 元素全屏进出后窗口/contentView 的 frame 账容易算错，
+        // 标题栏会变成浮在内容上的透明层、交通灯掉进内容区。
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 1280, height: 860))
+        container.autoresizesSubviews = true
+        webView.frame = container.bounds
+        webView.autoresizingMask = [.width, .height]
+        container.addSubview(webView)
+        window.contentView = container
         if !window.setFrameUsingName("dshMainWindow") { window.center() }
         window.setFrameAutosaveName("dshMainWindow")
         window.makeKeyAndOrderFront(nil)
         activateApp()
+
+        // 启动稳定后记一次正常几何，后面靠它判断标题栏是否被全屏搞乱
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.captureHealthyBaseline()
+        }
     }
 
     private func activateApp() {
@@ -289,6 +452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private func connect() {
         if connecting { return }
         connecting = true
+        authRepairAttempted = false
         shellLog("connect: ensuring service")
         loadMessagePage(title: "正在连接 dsh web…", detail: nil)
 
@@ -298,26 +462,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 self.connecting = false
                 self.loadMessagePage(
                     title: "无法连接 dsh web",
-                    detail: "服务 30 秒内没有就绪。请查看 ~/.dsh/web.err.log，或按 ⌘R 重试。"
+                    detail: "服务 30 秒内没有就绪。请查看 ~/.dsh/web.err.log，或按 ⇧⌘R 重试；"
+                        + "「视图」菜单里也有「重启服务」与「服务状态」。"
                 )
                 return
             }
-            guard let cookie = mintAuthCookie(for: dshURL) else {
-                self.connecting = false
-                shellLog("auth: cookie minting failed")
-                self.loadMessagePage(
-                    title: "无法生成访问凭据",
-                    detail: "读取 ~/.dsh/.credentials.yaml 里的 browser-session 密钥失败。请确认 DSH 启动过，然后按 ⌘R 重试。"
-                )
-                return
-            }
-            WKWebsiteDataStore.default().httpCookieStore.setCookie(cookie) {
-                DispatchQueue.main.async {
+            switch mintAuthCookie(for: dshURL) {
+            case .success(let cookie):
+                self.setCookie(cookie) {
                     self.connecting = false
                     shellLog("connect: loading \(dshURL.absoluteString)")
                     self.webView.load(URLRequest(url: dshURL))
                 }
+            case .failure(let failure):
+                // 具体原因写进错误页与日志（只记 reason，不记值）——笼统提示会把
+                // 「格式变了」误报成「DSH 没启动过」，排障走错方向。
+                self.connecting = false
+                shellLog("auth: cookie minting failed (reason=\(failure.logReason))")
+                self.loadMessagePage(
+                    title: "无法生成访问凭据",
+                    detail: "\(failure.hint)\n按 ⇧⌘R 重试。"
+                )
             }
+        }
+    }
+
+    private func setCookie(_ cookie: HTTPCookie, then completion: @escaping () -> Void) {
+        WKWebsiteDataStore.default().httpCookieStore.setCookie(cookie) {
+            DispatchQueue.main.async(execute: completion)
         }
     }
 
@@ -329,24 +501,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             return
         }
         DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            process.arguments = [script.path, "--ensure"]
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            var ready = false
-            do {
-                try process.run()
-                process.waitUntilExit()
-                ready = process.terminationStatus == 0
-            } catch {
-                shellLog("ensure: failed to run: \(error.localizedDescription)")
-            }
-            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            shellLog("ensure: exit=\(process.terminationStatus)\(output.isEmpty ? "" : " output=\(output)")")
-            DispatchQueue.main.async { completion(ready) }
+            let result = runScriptSync(script.path, ["--ensure"])
+            shellLog("ensure: exit=\(result.status)\(result.output.isEmpty ? "" : " output=\(result.output)")")
+            DispatchQueue.main.async { completion(result.status == 0) }
         }
     }
 
@@ -410,6 +567,165 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         webView.evaluateJavaScript("window.__dshChromeResample && window.__dshChromeResample()") { _, _ in }
     }
 
+    // 强制重贴一次标题栏底色：修复动作会冲掉透明标题栏下的 appearance，
+    // 而 applyChrome 按 chromeColor 去重 —— 先把缓存清掉再贴。
+    private func reapplyChrome() {
+        guard let color = chromeColor else { return }
+        chromeColor = nil
+        applyChrome(color)
+    }
+
+    // MARK: - 标题栏自愈（全屏退出后标题栏/交通灯错位）
+
+    // 为什么要这一整套（2026-11-03）：WebKit 元素全屏（isElementFullscreenEnabled）
+    // 进出后，窗口常残留 .fullSizeContentView —— 标题栏变成浮在内容上的透明层，
+    // 红黄绿三个按钮位置错乱甚至掉进内容区。这是 WebKit 通用坑，不是 dsh 特有；
+    // LibreTV-shell 已踩过并给出「几何判据 + 四步递进修复」，这里照搬并保留 dsh 的
+    // 透明标题栏（修复第 ④ 步会把 titlebarAppearsTransparent 拨回去，必须重贴底色）。
+    //
+    // 判据全部相对窗口自身几何，不依赖绝对坐标（窗口尺寸可变）。
+
+    private func fmt(_ r: NSRect) -> String {
+        String(format: "%.0f,%.0f %.0fx%.0f", r.minX, r.minY, r.width, r.height)
+    }
+
+    private func fmt(_ p: NSPoint) -> String {
+        String(format: "%.1f,%.1f", p.x, p.y)
+    }
+
+    /// 红绿灯（关闭按钮）中心点，换算到窗口坐标系
+    private func closeButtonCenterInWindow() -> NSPoint? {
+        guard let button = window.standardWindowButton(.closeButton),
+              let superview = button.superview else { return nil }
+        return superview.convert(NSPoint(x: button.frame.midX, y: button.frame.midY), to: nil)
+    }
+
+    /// 标题栏高度 = 窗口高 - 内容布局区高。正常约 28；被 .fullSizeContentView 吃掉时变 0
+    private var titleBarHeight: CGFloat {
+        max(0, window.frame.height - window.contentLayoutRect.height)
+    }
+
+    private func captureHealthyBaseline() {
+        guard let center = closeButtonCenterInWindow() else { return }
+        healthyCloseCenter = center
+        shellLog("baseline: close=\(fmt(center)) barH=\(titleBarHeight) mask=\(window.styleMask.rawValue) frame=\(fmt(window.frame))")
+    }
+
+    /// 标题栏是否被搞乱：按钮相对左边距应与基准一致、应垂直居中于标题栏、标题栏高度应正常
+    private func titleBarIsBroken() -> Bool {
+        guard !window.styleMask.contains(.fullScreen) else { return false }
+        guard let baseline = healthyCloseCenter else { return false }
+        guard let center = closeButtonCenterInWindow() else {
+            return window.styleMask.contains(.titled)   // 该有按钮却没有 = 已坏
+        }
+        if abs(center.x - baseline.x) > 3 { return true }
+        let bar = titleBarHeight
+        if bar < 20 { return true }                                    // 标题栏被内容吃掉
+        if center.y < window.contentLayoutRect.height { return true }   // 按钮掉进内容区
+        if center.y > window.frame.height { return true }               // 按钮顶出窗口
+        let expectedY = window.frame.height - bar / 2
+        if abs(center.y - expectedY) > 6 { return true }                // 未垂直居中
+        return false
+    }
+
+    private func scheduleTitleBarRepair(_ reason: String, delay: TimeInterval) {
+        pendingRepair?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingRepair = nil
+            self.repairTitleBarIfNeeded(reason)
+        }
+        pendingRepair = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func repairTitleBarIfNeeded(_ reason: String) {
+        guard window != nil, !window.styleMask.contains(.fullScreen) else { return }
+        guard !repairing else { return }
+        guard titleBarIsBroken() else {
+            repairAttempts = 0
+            return
+        }
+        // 冷却（自愈动作会自身触发 resize/becomeKey）：被挡下就排一次重试，
+        // 但不无限重排——最多 6 次仍修不好就记日志收手。
+        if Date().timeIntervalSince(lastRepairAt) < 1.0 {
+            guard repairAttempts < 6 else { return }
+            repairAttempts += 1
+            scheduleTitleBarRepair("\(reason) retry", delay: 1.2)
+            return
+        }
+
+        repairing = true
+        lastRepairAt = Date()
+        defer { repairing = false }
+
+        shellLog("titlebar broken (\(reason)): close=\(closeButtonCenterInWindow().map { fmt($0) } ?? "nil") barH=\(titleBarHeight) mask=\(window.styleMask.rawValue) frame=\(fmt(window.frame))")
+
+        // ① 复位样式掩码：WebKit 全屏常残留 .fullSizeContentView，标题栏会变成浮层
+        if window.styleMask != baseStyleMask {
+            window.styleMask = baseStyleMask
+            window.contentView?.superview?.layoutSubtreeIfNeeded()
+            if !titleBarIsBroken() { shellLog("repair ok: styleMask reset"); return }
+        }
+
+        // ② 尺寸微调 1pt 再还原，逼 AppKit 按新宽度重排标题栏与交通灯
+        let frame = window.frame
+        window.setFrame(NSRect(x: frame.minX, y: frame.minY, width: frame.width + 1, height: frame.height),
+                        display: true)
+        window.setFrame(frame, display: true)
+        window.contentView?.superview?.layoutSubtreeIfNeeded()
+        if !titleBarIsBroken() { shellLog("repair ok: frame nudge"); return }
+
+        // ③ 翻转 .titled 位，让 AppKit 重建标题栏容器
+        window.styleMask = baseStyleMask.subtracting(.titled)
+        window.styleMask = baseStyleMask
+        window.contentView?.superview?.layoutSubtreeIfNeeded()
+        if !titleBarIsBroken() { shellLog("repair ok: titled toggle"); return }
+
+        // ④ 刷新透明标题栏状态（会连带重算交通灯位置）。
+        //    dsh 的设计是「标题栏透明 + 窗口底色 = 页面底色」，所以这里必须落回
+        //    true，并把底色/appearance 重贴一次，否则标题栏会退回系统灰。
+        window.titlebarAppearsTransparent = false
+        window.titlebarAppearsTransparent = true
+        reapplyChrome()
+        shellLog(titleBarIsBroken() ? "repair failed: still broken" : "repair ok: titlebar refresh")
+    }
+
+    // MARK: - 全屏与窗口几何事件
+
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        savedFrameBeforeFullScreen = window.frame
+        shellLog("enter fullscreen: saved=\(fmt(window.frame))")
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        shellLog("did enter fullscreen: frame=\(fmt(window.frame))")
+        scheduleTitleBarRepair("didEnterFullScreen", delay: 0.3)
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        shellLog("did exit fullscreen: frame=\(fmt(window.frame))")
+        // WebKit 元素全屏常把窗口撑到整屏却不缩回：恢复到进全屏前的尺寸
+        if let saved = savedFrameBeforeFullScreen {
+            savedFrameBeforeFullScreen = nil
+            let screenHeight = window.screen?.visibleFrame.height ?? 0
+            if saved.width > 0, window.frame.height >= screenHeight - 2 {
+                window.setFrame(saved, display: true)
+                shellLog("restored frame: \(fmt(saved))")
+            }
+        }
+        scheduleTitleBarRepair("didExitFullScreen", delay: 0.25)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard !window.styleMask.contains(.fullScreen) else { return }
+        scheduleTitleBarRepair("resize", delay: 0.3)
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        scheduleTitleBarRepair("becomeKey", delay: 0.2)
+    }
+
     // MARK: - 菜单
 
     private func buildMenu() {
@@ -468,9 +784,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         mainMenu.addItem(viewItem)
         let viewMenu = NSMenu(title: "视图")
         viewItem.submenu = viewMenu
+        // ⌘R = 刷页面（快路径，保 cookie 与会话）；⇧⌘R = 重跑 ensure + 重铸 cookie。
+        // 原来只有一项、且执行的是 connect()，于是「想刷一下」要等探测最多 30s（P1-1）。
         let reloadItem = NSMenuItem(title: "重新载入", action: #selector(reloadPage(_:)), keyEquivalent: "r")
         reloadItem.target = self
         viewMenu.addItem(reloadItem)
+        let reconnectItem = NSMenuItem(title: "重新连接", action: #selector(reconnectService(_:)), keyEquivalent: "r")
+        reconnectItem.keyEquivalentModifierMask = [.command, .shift]
+        reconnectItem.target = self
+        viewMenu.addItem(reconnectItem)
         viewMenu.addItem(.separator())
         let zoomInItem = NSMenuItem(title: "放大", action: #selector(zoomIn(_:)), keyEquivalent: "=")
         zoomInItem.target = self
@@ -489,6 +811,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         )
         fullScreenItem.keyEquivalentModifierMask = [.command, .control]
         viewMenu.addItem(fullScreenItem)
+        viewMenu.addItem(.separator())
+        // 排障入口（P1-2）：服务卡住时不必开终端跑 dsh-restart / tail 日志。
+        let restartItem = NSMenuItem(title: "重启服务", action: #selector(restartService(_:)), keyEquivalent: "")
+        restartItem.target = self
+        viewMenu.addItem(restartItem)
+        let shellLogItem = NSMenuItem(title: "打开壳日志", action: #selector(openShellLog(_:)), keyEquivalent: "")
+        shellLogItem.target = self
+        viewMenu.addItem(shellLogItem)
+        let serviceLogItem = NSMenuItem(title: "打开服务日志", action: #selector(openServiceLog(_:)), keyEquivalent: "")
+        serviceLogItem.target = self
+        viewMenu.addItem(serviceLogItem)
+        let statusItem = NSMenuItem(title: "服务状态", action: #selector(showServiceStatus(_:)), keyEquivalent: "")
+        statusItem.target = self
+        viewMenu.addItem(statusItem)
 
         let windowItem = NSMenuItem()
         mainMenu.addItem(windowItem)
@@ -519,7 +855,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         NSApp.windowsMenu = windowMenu
     }
 
-    @objc private func reloadPage(_ sender: Any?) { connect() }
+    // ⌘R：快路径，只刷当前页（保 cookie 与页面会话）。若当前是错误占位页
+    // （loadHTMLString，非 http 页），刷新没有意义，退回完整重连。
+    @objc private func reloadPage(_ sender: Any?) {
+        let live = webView.url?.absoluteString.hasPrefix("http") == true
+        guard live else {
+            shellLog("reload: no live page, falling back to connect")
+            connect()
+            return
+        }
+        shellLog("reload: \(webView.url?.absoluteString ?? "?")")
+        webView.reload()
+    }
+
+    // ⇧⌘R：慢路径，重跑 ensure + 重铸 cookie。
+    @objc private func reconnectService(_ sender: Any?) { connect() }
+
     @objc private func showMainWindow(_ sender: Any?) {
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
@@ -528,6 +879,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     @objc private func zoomIn(_ sender: Any?) { webView.pageZoom = min(webView.pageZoom + 0.1, 3.0) }
     @objc private func zoomOut(_ sender: Any?) { webView.pageZoom = max(webView.pageZoom - 0.1, 0.5) }
     @objc private func zoomReset(_ sender: Any?) { webView.pageZoom = 1.0 }
+
+    // MARK: - 排障入口（P1-2）
+
+    private func homePath(_ relative: String) -> String {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(relative).path
+    }
+
+    private func alert(_ title: String, _ detail: String) {
+        let panel = NSAlert()
+        panel.messageText = title
+        panel.informativeText = detail
+        panel.alertStyle = .informational
+        panel.runModal()
+    }
+
+    @objc private func restartService(_ sender: Any?) {
+        let script = homePath(".npm-global/bin/dsh-restart")
+        guard FileManager.default.fileExists(atPath: script) else {
+            alert("找不到 dsh-restart", "\(script) 不存在，先跑一次 bash build.sh 安装命令行工具。")
+            return
+        }
+        shellLog("menu: restart service")
+        loadMessagePage(title: "正在重启 dsh web…", detail: "通常几秒即可，完成后会自动重新连接。")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = runScriptSync(script, [])
+            guard let self else { return }
+            DispatchQueue.main.async {
+                shellLog("restart: exit=\(result.status)\(result.output.isEmpty ? "" : " output=\(result.output)")")
+                if result.status == 0 {
+                    self.connect()
+                } else {
+                    self.alert("重启服务失败", result.output.isEmpty
+                        ? "dsh-restart 退出码 \(result.status)。详情见 ~/.dsh/web.err.log。"
+                        : result.output)
+                }
+            }
+        }
+    }
+
+    @objc private func openShellLog(_ sender: Any?) { openLog(homePath(".dsh/shell.log")) }
+    @objc private func openServiceLog(_ sender: Any?) { openLog(homePath(".dsh/web.err.log")) }
+
+    // 日志没有关联的默认程序时 open 会返回 false，退回「在访达中显示」，
+    // 至少让用户能拿到文件而不是点了没反应。
+    private func openLog(_ path: String) {
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            alert("日志还不存在", url.path)
+            return
+        }
+        if !NSWorkspace.shared.open(url) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+    }
+
+    // 状态判据全部来自既有脚本/服务，壳自己不另立一套：ensure 退出码 + HTTP 码。
+    @objc private func showServiceStatus(_ sender: Any?) {
+        guard let script = Bundle.main.url(forResource: "launcher", withExtension: "sh") else {
+            alert("服务状态", "bundle 里缺少 launcher.sh，请重跑 bash build.sh。")
+            return
+        }
+        shellLog("menu: service status")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = runScriptSync(script.path, ["--ensure"])
+            let code = probeHTTPCode()
+            guard let self else { return }
+            DispatchQueue.main.async {
+                shellLog("status: ensure=\(result.status) http=\(code)")
+                let ready = result.status == 0 && isReadyCode(code)
+                var lines = [
+                    "HTTP \(code)（401/2xx/3xx 视为就绪）",
+                    "launcher.sh --ensure 退出码 \(result.status)",
+                ]
+                if !ready { lines.append("最近错误见 ~/.dsh/web.err.log。") }
+                self.alert(ready ? "dsh web 就绪" : "dsh web 未就绪", lines.joined(separator: "\n"))
+            }
+        }
+    }
 
     // MARK: - WKNavigationDelegate
 
@@ -540,14 +969,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             decisionHandler(.allow)
             return
         }
-        let sameHost = url.host == dshURL.host
-        let samePort = (url.port ?? 80) == (dshURL.port ?? 80)
-        if !(sameHost && samePort) {
+        if !isLocal(url) {
             NSWorkspace.shared.open(url)
             decisionHandler(.cancel)
             return
         }
         decisionHandler(.allow)
+    }
+
+    // 主框架 401 = cookie 过期（有效期 30 天）或已丢失。原来只会在 connect() 里 mint，
+    // 于是过期后页面永远停在认证墙，只能靠「重连」这一路手动补救（P1-3）。
+    // 这里拦一次、重铸一次再 reload；配额用尽就放行，让服务端的认证页正常显示，
+    // 避免凭证真失效时无限 reload。
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        guard navigationResponse.isForMainFrame,
+              let http = navigationResponse.response as? HTTPURLResponse else {
+            decisionHandler(.allow)
+            return
+        }
+        guard http.statusCode == 401 else {
+            authRepairAttempted = false   // 正常响应：重置重铸配额
+            decisionHandler(.allow)
+            return
+        }
+        guard !authRepairAttempted else {
+            authRepairAttempted = false
+            shellLog("auth: still 401 after re-mint, showing server page")
+            decisionHandler(.allow)
+            return
+        }
+        switch mintAuthCookie(for: dshURL) {
+        case .success(let cookie):
+            authRepairAttempted = true
+            shellLog("auth: re-minted after 401")
+            setCookie(cookie) { webView.reload() }
+            decisionHandler(.cancel)
+        case .failure(let failure):
+            // 重铸失败与「过期重铸」必须能分开看，否则日志会把格式问题误读成过期
+            shellLog("auth: 401 and re-mint failed (reason=\(failure.logReason))")
+            decisionHandler(.allow)
+        }
+    }
+
+    // WebKit 的内容进程被系统回收（内存压力、页面 OOM）时，窗口会停在纯灰底、
+    // 页面无响应，只有 reload 才重新拉起进程（保 cookie、等价于刷页面）。
+    // 冷却：必崩的页面无限重载只会刷日志，5s 内超过 2 次就转错误页（P0-1）。
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        shellLog("web content process terminated: reloading")
+        let now = Date()
+        if now.timeIntervalSince(lastCrashReloadAt) > 5 { crashReloadCount = 0 }
+        lastCrashReloadAt = now
+        crashReloadCount += 1
+        guard crashReloadCount <= 2 else {
+            shellLog("web content process terminated: too frequent, stopping auto-reload")
+            loadMessagePage(
+                title: "页面进程反复崩溃",
+                detail: "已暂停自动刷新（5 秒内第 \(crashReloadCount) 次）。按 ⇧⌘R 重新连接。"
+            )
+            return
+        }
+        webView.reload()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -570,7 +1052,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private func failPage(_ error: Error) {
         if (error as NSError).code == NSURLErrorCancelled { return }
         shellLog("load failed: \(error.localizedDescription)")
-        loadMessagePage(title: "页面加载失败", detail: "\(error.localizedDescription)\n按 ⌘R 重试。")
+        loadMessagePage(title: "页面加载失败", detail: "\(error.localizedDescription)\n按 ⇧⌘R 重新连接。")
     }
 
     // MARK: - WKUIDelegate
@@ -583,9 +1065,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     private func openExternallyOrInPlace(_ url: URL) {
         guard let scheme = url.scheme?.lowercased() else { return }
-        if (scheme == "http" || scheme == "https"),
-           url.host == dshURL.host,
-           (url.port ?? 80) == (dshURL.port ?? 80) {
+        if (scheme == "http" || scheme == "https"), isLocal(url) {
             webView.load(URLRequest(url: url))
         } else if scheme == "http" || scheme == "https" || scheme == "mailto" || scheme == "tel" {
             NSWorkspace.shared.open(url)
