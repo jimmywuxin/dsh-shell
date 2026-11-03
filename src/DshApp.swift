@@ -136,13 +136,35 @@ private func redactSecrets(_ text: String) -> String {
     return out
 }
 
+// 时间戳用本地时区（带 +08:00 偏移）：纯 UTC 排障时要心算 8 小时，2026-11-03 实踩。
+private let logTimestampFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.timeZone = .current
+    return formatter
+}()
+
+// shell.log 超过这个大小就轮转。只留一份 .old：日志是诊断用途，不值得堆历史；
+// web.err.log 由 dsh-launch.sh 管，壳只管自己这份。
+private let logRotateBytes = 1_000_000
+
+// 只在 logQueue 里调用（写日志天然串行，无并发问题）：超限先把当前文件挪成
+// .old 再建新文件。写句柄每次打开即用即关，mv + create 之间不存在丢写窗口。
+private func rotateLogIfNeeded(_ path: URL) {
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: path.path),
+          let size = (attrs[.size] as? NSNumber)?.intValue, size > logRotateBytes else { return }
+    let old = path.deletingPathExtension().appendingPathExtension("log.old")
+    try? FileManager.default.removeItem(at: old)
+    try? FileManager.default.moveItem(at: path, to: old)
+}
+
 private func shellLog(_ message: String) {
     let sanitized = redactSecrets(message)
     logQueue.async {
         let fileManager = FileManager.default
         let path = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".dsh/shell.log")
-        let line = "\(ISO8601DateFormatter().string(from: Date())) \(sanitized)\n"
+        let line = "\(logTimestampFormatter.string(from: Date())) \(sanitized)\n"
         guard let data = line.data(using: .utf8) else { return }
+        rotateLogIfNeeded(path)
         if !fileManager.fileExists(atPath: path.path) {
             fileManager.createFile(atPath: path.path, contents: nil, attributes: [.posixPermissions: 0o600])
         }
