@@ -1,20 +1,17 @@
 #!/bin/bash
-# dsh-shell 构建脚本
-#   1) 组装 .app → ~/Applications（Swift 原生壳 + launcher.sh + 图标 + Info.plist）
-#   2) 渲染并安装 launchd 服务（src/ai.dsh.web.plist → ~/Library/LaunchAgents/）
-#   3) 安装 dsh-restart / dsh-kill 到 ~/.npm-global/bin
-#
-# 2026-09-14 改造要点（原版有三个坑）：
-#   - 原版只组装 .app，launchd plist 只在注释里留了骨架（且 label 还是历史命名
-#     com.jimmy.dsh-web）——服务实际靠手工装的 ai.dsh.web 在跑，仓库里没有源文件。
-#     现已纳入构建流程。
-#   - 原版无条件 `cp dsh-* 到 PATH`。若仓库版本落后于线上版本（09-14 就发生过：
-#     线上是 launchd 感知版，仓库还是旧的 pkill 版），跑一次 build 就把线上脚本
-#     降级了。现改为：内容不同则先备份线上版本再覆盖，并打印提示。
-#   - 原版 mktemp -d 的 iconset 从不清理，且 icns 落到 $HOME 根目录永久残留。
-#     现用 trap 清理临时目录，icns 改落 build/ 下（.gitignore 已忽略）。
+# dsh-shell 构建脚本：组装 .app → 渲染安装 launchd plist → 安装 CLI 与共享库
+# → 渲染 launchd 入口 wrapper（@NODE@ / @DSH@ / @HOME@）。
+# 沿革见 CHANGELOG.md；下面每条「别改 / 安全默认」注释都是仍生效的约束。
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# 构建期自检：脚本改坏了宁可构建失败，也别装出打不开的 .app / 起不来的服务。
+# 新增脚本要同步加进这个清单。
+for f in build.sh release.sh dsh-kill dsh-restart \
+         src/dsh-lib.sh src/dsh-launch.sh src/launcher.sh; do
+  bash -n "$f" || { echo "错误：$f 语法检查未通过" >&2; exit 1; }
+done
+bash src/dsh-lib.sh >/dev/null || { echo "错误：dsh-lib 自检未通过" >&2; exit 1; }
 
 # 用法：build.sh [--reload]
 #   --reload  允许 bootout + bootstrap 重载服务（**仅限真终端**）。默认不开：
@@ -165,6 +162,7 @@ cat > "$APP_NEW/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+plutil -lint "$APP_NEW/Contents/Info.plist" >/dev/null
 
 # ad-hoc 签名：让 LaunchServices/WebKit 把它当普通 app 对待（WKWebView 的
 # WebContent 进程靠 XPC 拉起）。本机构建不走 Gatekeeper，签名失败只提示不中断。
@@ -195,6 +193,7 @@ s|@DSH@|$DSH_JS|g
 s|@HOME@|$HOME|g
 }"
 sed -e "$SED_SCRIPT" src/ai.dsh.web.plist > "$PLIST_TMP"
+plutil -lint "$PLIST_TMP" >/dev/null
 
 PLIST_CHANGED=0
 if [ -f "$PLIST_DST" ] && ! cmp -s "$PLIST_TMP" "$PLIST_DST"; then
@@ -281,6 +280,7 @@ sed -e "s|@NODE@|$NODE_BIN|g" \
     -e "s|@DSH@|$DSH_JS|g" \
     -e "s|@HOME@|$HOME|g" \
     src/dsh-launch.sh > "$LAUNCH_BUILT"
+bash -n "$LAUNCH_BUILT"
 
 # 渲染后自检：变量名后紧跟非 ASCII 字符的写法，在 macOS 自带 bash 3.2 下会把 UTF-8
 # 首字节吞进变量名 → set -u 报「<乱码>: unbound variable」当场崩。2026-10-24 两次

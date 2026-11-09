@@ -1,42 +1,29 @@
 #!/bin/bash
 # dsh-launch.sh —— launchd 入口 wrapper（ai.dsh.web 的 ProgramArguments 指向它）。
-# 由 build.sh 渲染（@NODE@ / @DSH@ / @HOME@）后安装到 ~/.dsh/lib/dsh-launch.sh。
+# 由 build.sh 渲染（@NODE@ / @DSH@ / @HOME@）后装到 ~/.dsh/lib/dsh-launch.sh。
 #
-# 为什么要有这一层（2026-10-24 实踩复盘）：
-#   原来 plist 直接 exec `node bin.js --profile web --no-open`。一旦 :3080 被一个
-#   **不受 launchd 托管的孤儿 dsh 实例**占住，KeepAlive 就以 10s 间隔无限重试，
-#   每一轮都 `EADDRINUSE`：
-#     · ~/.dsh/logs/ 堆到 19188 个 startup 日志、227MB
-#     · web.err.log 涨到 19MB
-#     · 真正的病因（孤儿进程）埋在 19MB 文件尾，肉眼翻不出来
-#   用户侧看到的就是「dsh 打不开」，且重启服务毫无复原迹象。
+# plist 不直接 exec node：:3080 被孤儿 dsh 占住时 KeepAlive 会无限 EADDRINUSE
+# 重试（曾堆出 19188 个 startup 日志 / 227MB）。wrapper 在 exec 前：
+#   1) 轮转超大 web.err.log（copytruncate，不动 inode，launchd 仍写同一 inode）
+#   2) 清理过期 startup 日志
+#   3) 清失效 credentials writer lock
+#   4) 清占端口的孤儿 dsh；被非 dsh 程序占用则说清后 exit 78（不可自愈）
+#   5) 记录入口文件指纹到 .service-fp，供 launcher.sh 判断服务是否跑旧代码
+# 配合 plist 的 ThrottleInterval=60，不可自愈故障不再 10s 一轮刷屏。
+# 退出码：0/正常由 exec 顶替；78(EX_CONFIG) = 环境问题、需人介入。
 #
-#   这一层在 exec 之前做四件事：
-#     1) 清掉占着 :3080 的**孤儿 dsh 实例**（本次故障的直接病因）
-#     2) 自轮转超大 web.err.log（copytruncate，不动 inode）
-#     3) 清理过期 startup 日志
-#     4) 清失效的 credentials writer lock
-#   并把「被非 dsh 程序占用」这种**不可自愈**的情况一次性说清楚后退出，
-#   配合 plist 的 ThrottleInterval=60 把重试压到 1 分钟一次 —— 日志不再爆，
-#   原因一行可读。
-#
-# 退出码约定：0/正常由 exec 顶替；78(EX_CONFIG) = 环境问题、需人介入。
-#
-# ⚠ 写法约定：本脚本的日志都是中文，**任何变量插值都必须写成 ${VAR}**，不能在变量
-#   名后直接跟中文/全角符号。macOS 自带 bash 3.2 在变量名边界判断上按字节走，全角
-#   括号的首字节会被吞进变量名 → set -u 报「<乱码>: unbound variable」直接崩掉。
-#   2026-10-24 实测踩了两次（端口号和 pid 两处），且都崩在「孤儿清理」这条最关键
-#   的路径上。build.sh 渲染后有 perl 自检拦这种写法（跳过注释行，故本段安全）。
+# ⚠ 日志是中文，变量插值一律 ${VAR}：macOS bash 3.2 按字节判变量名边界，
+#   紧跟全角字符会把首字节吞进变量名 → set -u 崩（曾两次崩在孤儿清理路径）。
+#   build.sh 渲染后有 perl 自检拦这种写法（跳过注释行）。
 set -u
 
 NODE_BIN="@NODE@"
 DSH_JS="@DSH@"
 HOME_DIR="@HOME@"
 
-DSH_BIN="$HOME_DIR/.npm-global/bin/dsh"
 ERR_LOG="$HOME_DIR/.dsh/web.err.log"
 ERR_PREV="$HOME_DIR/.dsh/web.err.log.prev"
-LOG_DIR="$HOME_DIR/.dsh/logs"
+STARTUP_LOG_DIR="$HOME_DIR/.dsh/logs"
 LOCK="$HOME_DIR/.dsh/.credentials.yaml.lock"
 PORT=3080
 PROC_PATTERN='bin\.js.*--profile web'
@@ -65,12 +52,13 @@ rotate_err_log() {
 
 # ── 2) 过期 startup 日志清理 ─────────────────────────────────────────
 prune_startup_logs() {
-  [ -d "$LOG_DIR" ] || return 0
+  [ -d "$STARTUP_LOG_DIR" ] || return 0
   local n
-  n=$(find "$LOG_DIR" -name 'startup-*.log' -mtime "+$STARTUP_KEEP_DAYS" 2>/dev/null | wc -l | tr -d ' ')
-  [ "${n:-0}" -gt 0 ] || return 0
-  find "$LOG_DIR" -name 'startup-*.log' -mtime "+$STARTUP_KEEP_DAYS" -delete 2>/dev/null || true
-  log "清理超过 ${STARTUP_KEEP_DAYS} 天的 startup 日志 $n 个"
+  # -print -delete 一次遍历：既拿计数又删，不必 find 两遍。
+  n=$(find "$STARTUP_LOG_DIR" -name 'startup-*.log' -mtime "+$STARTUP_KEEP_DAYS" \
+        -print -delete 2>/dev/null | wc -l | tr -d ' ')
+  [ "${n:-0}" -gt 0 ] && log "清理超过 ${STARTUP_KEEP_DAYS} 天的 startup 日志 $n 个"
+  return 0
 }
 
 # ── 3) 失效 credentials 锁 ───────────────────────────────────────────
@@ -159,6 +147,13 @@ rotate_err_log
 prune_startup_logs
 reap_stale_lock
 free_port
+
+# ── 5) 记录本次加载的入口文件指纹 ──────────────────────────────
+# launcher.sh 靠它判断服务是否还跑旧代码。路径须与 dsh-lib.sh 的
+# SERVICE_FP 一致（本脚本不 source 库，故各写一份）。
+# -L 跟随软链、size|inode 比 mtime 稳；写失败不阻断启动，下次自愈换血。
+SERVICE_FP="$HOME_DIR/.dsh/.service-fp"
+stat -L -f '%z|%i' "$DSH_JS" > "$SERVICE_FP" 2>/dev/null || true
 
 # 交棒给真正的服务进程。exec 保留本 PID，launchd 的 pid 追踪不中断。
 exec "$NODE_BIN" "$DSH_JS" --profile web --no-open

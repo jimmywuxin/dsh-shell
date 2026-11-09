@@ -1,27 +1,11 @@
 #!/bin/bash
-# dsh-kill：停止 dsh web 服务（dsh-restart 的只停版，不重启）
-#
-# 2026-09-14 改造：原版只用 pkill，而服务已由 launchd 托管（ai.dsh.web，
-# KeepAlive=true）——杀掉进程 launchd 会在数秒内原地拉起，pkill 等于没停。
-# 现改为：
-#   launchd 托管 → launchctl bootout（本会话内卸载；**不影响下次登录自动加载**）
-#   未托管 / bootout 失败 → 退回 pkill 逻辑
-#
-# 注：非托管分支的进程匹配从 `pkill -f "dsh web"` 改为匹配真实 argv。
-#     dsh 实际以 `node …/dsh/lib/bin.js --profile web --no-open` 运行，命令行里
-#     并没有连续的 "dsh web" 子串，旧写法一个进程都匹配不到，只会空等 20s 再报
-#     「停止失败」。现按「node + dsh 的 bin.js + --profile web」特征一起匹配。
-#
-# 注 2（2026-09-23）：bootout 之后 label 在 launchd 里不再存在，**恢复要靠
-#     「从 plist 重新 bootstrap」**——`dsh-restart` 与双击 dsh.app 都已补这条路。
-#
-# 2026-10-05 改造：常量/判据/锁处理抽到 dsh-lib.sh；另修两点：
-#   ① 停止判据从「端口有响应」升级为「无进程 + 端口释放」。旧判据只探端口，若3080
-#      被非 dsh 进程占用，会空等 15s 再报「停止失败」，且用户看不出是谁占着。
-#      现额外核对匹配进程是否真的没了。
-#   ② 停止后清一次失效锁：bootout/pkill 强杀会带走持锁进程，留下的锁会让下次
-#      启动崩在 writer lock 超时上（dsh-restart 的启动前清理只能救「重启」这条
-#      路，救不了「手动双击图标」那条）。
+# dsh-kill：停止 dsh web 服务（dsh-restart 的只停版，不重启）。
+# 服务由 launchd 托管（KeepAlive=true），pkill 会被原地复活 → 必须先 bootout。
+# bootout 只影响本会话，下次登录仍自动加载；恢复靠从 plist 重新 bootstrap。
+# 进程匹配必须用真实 argv（bin.js --profile web）；"dsh web" 子串一个都匹配不到。
+# 停止判据 = 无匹配进程 + 端口无响应，只探端口会被非 dsh 占用者骗过。
+# 强杀会带走持锁进程，收尾必须清一次失效锁，否则下次启动撞 writer lock 超时。
+# 沿革见 CHANGELOG.md。
 set -u
 
 # PATH 由 dsh-lib.sh 统一补（含 /opt/homebrew/bin，与 build.sh 的 node 候选一致）
@@ -34,11 +18,11 @@ fi
 # shellcheck source=../src/dsh-lib.sh
 . "$LIB"
 
-alive()   { curl -s -o /dev/null --noproxy '*' --max-time 1 "$URL"; }
+port_responds() { curl -s -o /dev/null --noproxy '*' --max-time 1 "$URL"; }
 dsh_pids() { pgrep -f "$PROC_PATTERN" 2>/dev/null; }
 
 # 停了 = 匹配进程已无（强杀后仍可能短暂在，pgrep 空为准）+ 端口已释放。
-stopped() { [ -z "$(dsh_pids)" ] && ! alive; }
+stopped() { [ -z "$(dsh_pids)" ] && ! port_responds; }
 
 # 轮询到停：$1=轮数（每轮 0.5s），$2=完成话术。
 # 2026-10-06：这段循环原本在下面出现了 4 次（bootout / 强杀 / pkill / 再强杀）。
@@ -57,16 +41,21 @@ finish() {
   exit 0
 }
 
+# 两条路径共用的收尾：软停没成就强杀，仍不停就带上现场信息失败退出。
+force_stop_or_die() {
+  echo "进程未退出，尝试强制终止…" >&2
+  pkill -9 -f "$PROC_PATTERN" 2>/dev/null
+  wait_stop 10 "强制终止"
+  echo "dsh web 停止失败：进程仍在（$(dsh_pids | tr '\n' ' ')），或端口 ${URL##*:} 被其他进程占用（$(lsof -nP -iTCP:"${URL##*:}" -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | sort -u | tr '\n' ' ')）。查看 $HOME/.dsh/web.err.log" >&2
+  exit 1
+}
+
 if launchd_managed; then
   # --- launchd 托管：bootout ---
   if launchctl bootout "$DOMAIN/$LABEL"; then
     echo "dsh web 卸载指令已发出（launchctl bootout），等待停止…"
     wait_stop 30 "launchd: bootout —— 服务已从 launchd 卸载，本会话内不会自启"
-    echo "bootout 后进程仍未退净，追加强制终止…" >&2
-    pkill -9 -f "$PROC_PATTERN" 2>/dev/null
-    wait_stop 10 "强制终止"
-    echo "dsh web 停止失败：进程仍在（$(dsh_pids | tr '\n' ' ')），或端口 3080 被其他进程占用（$(lsof -nP -iTCP:3080 -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $1}' | sort -u | tr '\n' ' ')）。查看 $HOME/.dsh/web.err.log" >&2
-    exit 1
+    force_stop_or_die
   fi
   echo "launchctl bootout 失败，退回 pkill 路径…" >&2
 else
@@ -81,10 +70,4 @@ else
 fi
 
 wait_stop 30 "已停止"
-
-echo "进程未退出，尝试强制终止…" >&2
-pkill -9 -f "$PROC_PATTERN" 2>/dev/null
-wait_stop 10 "强制终止"
-
-echo "dsh web 停止失败：进程仍在（$(dsh_pids | tr '\n' ' ')），或端口 3080 被其他进程占用。查看 $HOME/.dsh/web.err.log" >&2
-exit 1
+force_stop_or_die

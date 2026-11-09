@@ -1,17 +1,9 @@
 #!/bin/bash
-# release.sh：一键发版（commit → push main → tag → push tag → Release → 三者复核）
-#
-#   用法：bash release.sh <版本号> "<Release标题>" ["<Release notes 文字>"]
-#   例：  bash release.sh v1.1.0 "v1.1.0 某某功能"
-#
-# 存在的理由（2026-10-05）：手动发版时踩过一次坑——先打了 tag 才想起
-# CHANGELOG 的 commit 还没 push，导致 tag 指向本地 commit、远端 main 落后一截。
-# 「tag / 远端 main / HEAD 三者一致」正是 Jimmy 定的发版纪律，本脚本把顺序固定下来，
-# 末尾强制复核，不再靠人记得。
-#
-# notes 默认从 CHANGELOG.md 里取对应版本段落（与 CHANGELOG 保持同步）；
-# 传第三个参数则用它覆盖。CHANGELOG 没有对应段落且没传 notes 时直接报错——
-# 宁可不发，也不要发出与 CHANGELOG 不一致的 Release。
+# release.sh：一键发版（push main → tag → push tag → Release → 三者复核）。
+# 用法：bash release.sh <版本号> "<Release标题>" ["<Release notes 文字>"]
+# 顺序固定：main 必须先于 tag 推送；notes 默认取 CHANGELOG 同版本段落，
+# 没有该段落且没传 notes 就拒发，保证 Release 与 CHANGELOG 一致。末尾强制复核
+# 远端 main / 远端 tag / HEAD 三者同 commit。gh 装在 /opt/homebrew/bin，PATH 前置兜底。
 set -euo pipefail
 cd "$(dirname "$0")"
 

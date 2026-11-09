@@ -2,6 +2,19 @@
 
 本项目的版本号按**功能里程碑**给，不按 commit 数给。修 bug 不升版本号。
 
+## v1.6.0 — 2026-11-09
+
+**脚本层精简**：对照 opencode-shell / hermes-shell / LibreTV-shell 的横向审查，收敛服务启动路径、去重、统一 launchd 唯一拉起方。
+
+### 改动
+
+- **升级换血改用入口文件指纹**：`dsh-launch.sh` 每次启动把 `stat -L -f '%z|%i'` 写到 `~/.dsh/.service-fp`，`launcher.sh` 只比对磁盘当前值。删掉 `ps etime` 解析（约 30 行，含 08/09 八进制坑）与 argv 反解 `stat` 不跟软链的兜底；`touch` / 同版重装不再误重启，记录缺失时换一次血自愈（旧 wrapper 迁移）。判据 `service_stale()` 放 `dsh-lib.sh`，自检新增 3 条断言
+- **删除两处 nohup 兜底**：`launcher.sh` / `dsh-restart` 手起的实例脱离 KeepAlive，且会被 wrapper 的 `free_port` 当孤儿杀掉。两条 launchd 路径都失败时改为明确报错（真终端跑 `dsh-restart`，或重启电脑让 RunAtLoad 装载）。README 里「launchd 是唯一拉起方」的纪律与例外段同步订正
+- **修 `refresh_if_upgraded` 假契约**：调用方原来无条件 `exit 0` 吞掉返回值、函数内部却直接 `exit 1`。现在只有「服务确实没起来」才 exit 1；kickstart 失败保留旧版本继续打开
+- **重复逻辑收敛**：`dsh-kill` 两条强杀尾部抽 `force_stop_or_die()`；`dsh-restart` 四处 `tail -20` 抽 `die_logged()`；`prune_startup_logs` 由两次 `find` 改成一次 `find -print -delete`
+- **构建期自检**：`build.sh` 先 `bash -n` 全量脚本 + 跑 `dsh-lib.sh` 自检，再 `plutil -lint` 生成的 Info.plist 与渲染后的 plist、wrapper 另做 `bash -n`。改坏脚本不再能装出打不开的 .app
+- **命名与冗余**：删 `dsh-launch.sh` 未使用的 `DSH_BIN`；`LOG_DIR`→`STARTUP_LOG_DIR`（与 dsh-lib 的 `LOG_DIR` 区分）、`alive`→`port_responds`；头注释里的沿革叙事压缩（149→58 行），仍生效的约束与「别改」理由全部保留
+
 ## v1.5.0 — 2026-11-04
 
 **取长补短**：对照 opencode-shell v1.2.2（Jimmy 同日手修的同病灶）互查，移植其「隐藏恢复换血」，并修掉 v1.4.0 实测带病的一处静默失效。

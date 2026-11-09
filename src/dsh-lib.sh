@@ -4,25 +4,15 @@
 # 由 build.sh 安装到 ~/.dsh/lib/dsh-lib.sh，供 launcher.sh / dsh-restart /
 # dsh-kill 三个脚本 source。**不单独执行**（直接跑它会走自检，见文件末尾）。
 #
-# 为什么要有这个库（2026-10-05）：label、就绪判据、失效锁处理原本在三个脚本里各抄
-# 一份，于是同一个坑只修了两个脚本——「kickstart -k 强杀半启动实例 → 留下
-# ~/.dsh/.credentials.yaml.lock → 下一实例 atomic-write 超时 → 崩溃循环」在
-# 09-14 实踩（launchd runs 计数到 14），dsh-restart 补了 reap_stale_lock，而
-# launcher.sh 至今没有。开机后 launchd 自动拉起服务要加载插件树（实测 10–30s），
-# 该窗口内双击图标 → probe 返 000 → 误判「没跑」→ kickstart -k → 正中靶心。
-# 一处定义、三处复用，比在每个调用点各补一次 guard 更小也更不容易漏。
-
-# 一个修一处、三处受益：这三个脚本可能由 Finder 双击拉起（launcher.sh），也可能由
-# 任何 PATH 残缺的 shell 拉起（dsh-restart / dsh-kill 是命令行工具但常被自动化调用），
-# 所以都要自己补 PATH。候选必须与 build.sh 的 node 候选一致 —— 原先三处硬编码只列了
-# ~/.local/bin 和 /usr/local/bin，漏了 /opt/homebrew/bin：若机器上唯一的 node 装在
-# homebrew，build.sh 能渲染出可用的 plist，但脚本侧的 nohup 兜底会卡在
-# `#!/usr/bin/env node` 上找不到解释器。
-# 末尾用 ${PATH:-...} 而不是 $PATH：三个脚本都是 set -u，而 PATH 被清空过（env -i
-# 只留 HOME 的自动化调用）时 $PATH 是未绑定变量 → 整个脚本崩在 source 这一行。
-# 现实场景实测：`env -i HOME=$HOME bash -c '. dsh-lib.sh'` 能正常拿到 curl/pgrep。
-# $HOME 本身不兜底：launchd 与 Finder 都必给 HOME，plist 里的 @HOME@ 也依赖它，
-# 真没有就当环境坏了、早点崩比静默算错路径好。
+# 一处定义、三处复用：label / 就绪判据 / 失效锁处理曾在三个脚本里各抄一份，
+# 修一个漏两个 → kickstart -k 强杀半启动实例留下失效锁 → 崩溃循环。
+# 开机后 launchd 加载插件树要 10–30s，该窗口内误判「没跑」再 kickstart 正中靶心。
+#
+# 三个脚本都可能由 PATH 残缺的 Finder / 自动化调用，故统一补 PATH；
+# 候选必须与 build.sh 的 node 候选一致。${PATH:-...} 不能写成 $PATH：
+# `env -i HOME=...` 下 set -u 会崩在 source 这一行。
+# $HOME 不兜底：launchd 与 Finder 必给，plist 的 @HOME@ 也依赖它。
+# 沿革见 CHANGELOG.md。
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
 
 LABEL="ai.dsh.web"
@@ -35,6 +25,21 @@ DSH_BIN="$HOME/.npm-global/bin/dsh"
 # 真实 argv：node .../@deepseek-ai/dsh/lib/bin.js --profile web --no-open。
 # 旧的 `pkill -f "dsh web"` 一个都匹配不到（命令行里没有连续的 "dsh web"）。
 PROC_PATTERN='bin\.js.*--profile web'
+# launchd wrapper 每次启动把入口文件指纹写这里，launcher 据此判断是否跑旧代码。
+SERVICE_FP="$LOG_DIR/.service-fp"
+
+# 服务是否跑着旧代码。stat -L 必须跟随软链：npm 升级换的是目标文件，
+# 软链自身的 inode 不变。无记录/空记录 = 旧 wrapper 或野实例 → 换一次血自愈；
+# 拿不到磁盘指纹（dsh 未安装）→ 放行，重启也起不来。
+service_stale() {
+  local disk recorded
+  disk="$(stat -L -f '%z|%i' "$DSH_BIN" 2>/dev/null)" || return 1
+  [ -n "$disk" ] || return 1
+  [ -f "$SERVICE_FP" ] || return 0
+  recorded="$(cat "$SERVICE_FP" 2>/dev/null)"
+  [ -n "$recorded" ] || return 0
+  [ "$disk" != "$recorded" ]
+}
 
 probe_code() {
   # --noproxy：本机地址不走代理，防止代理 502 被误判为「服务就绪」
@@ -100,6 +105,16 @@ dsh_lib_selftest() {
 
     [ "$(probe_code)" = "000" ] || { echo "FAIL: 空响应未兜底为 000"; exit 1; }
     app_ready && { echo "FAIL: 无服务被判为就绪"; exit 1; }
+
+    # 版本指纹：无记录判陈旧、同指纹判新鲜、软链目标变了判陈旧
+    DSH_BIN="$tmp/bin"; SERVICE_FP="$tmp/fp"
+    printf 'v1' > "$DSH_BIN"
+    service_stale || { echo "FAIL: 无指纹记录未判陈旧"; exit 1; }
+    stat -L -f '%z|%i' "$DSH_BIN" > "$SERVICE_FP"
+    service_stale && { echo "FAIL: 同指纹被判陈旧"; exit 1; }
+    ln -s "$DSH_BIN" "$tmp/link"; DSH_BIN="$tmp/link"
+    printf 'v2-longer' > "$DSH_BIN"
+    service_stale || { echo "FAIL: 软链目标变了未判陈旧"; exit 1; }
 
     : > "$LOCK"; reap_stale_lock >/dev/null 2>&1
     [ -f "$LOCK" ] || { echo "FAIL: 空锁被误删"; exit 1; }

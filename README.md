@@ -16,8 +16,8 @@ DSH Web GUI 的纯 UI 桌面壳：原生 WKWebView 窗口 + launchd 服务常驻
   - launchd plist 纳入仓库（`src/ai.dsh.web.plist`，构建时渲染），`build.sh` 不再无条件覆盖线上脚本
   - plist 里的 node **只取本机独立安装的**（`~/.local/bin` → Homebrew → `/usr/local`，**按序取第一个可执行的**），显式排除 WorkBuddy 内置的 `~/.workbuddy/binaries/node/...`：那是另一个 App 的内部目录，随它升级/清理而变动，常驻服务不该依赖；本机没有独立 node 时 `build.sh` 直接报错退出，不静默回退
 - **2026-09-23 改造**：补上「bootout 之后的恢复路径」。原版 `launcher.sh` 只对**已装载**的服务 `kickstart`，而 `dsh-kill` 走的是 `bootout`（把服务从 launchd 卸载）—— 于是**跑过 `dsh-kill` 后双击图标必报「服务未运行，且未找到 launchd 服务 ai.dsh.web」**。现为三级顺序兜底：
-  - `launcher.sh`：`kickstart`（已装载）→ `bootstrap plist`（已卸载，从文件重新装载）→ `nohup` 兜底（launchd 两条路都不通时，保证图标永远能用；此分支 launchd 未托管，不存在双实例）
-  - `dsh-restart`：同样先 `bootstrap` 再考虑 nohup（原版会静默 nohup 手起，把服务**拖离 launchd 托管**、丢掉 KeepAlive，直到下次登录才回正轨）
+  - `launcher.sh`：`kickstart`（已装载）→ `bootstrap plist`（已卸载，从文件重新装载）；两条路都失败就报错，**不手起进程**（2026-11-09 移除 nohup 兜底：手起实例会被 wrapper 的 free_port 当孤儿杀掉）
+  - `dsh-restart`：同样先 `bootstrap`（原版会静默 nohup 手起，把服务**拖离 launchd 托管**、丢掉 KeepAlive；2026-11-09 起两条路都失败直接报错，交回 launchd）
   - **关键实据**：`launchctl bootstrap` 在 WorkBuddy 派生的 shell 里必报 `5: Input/output error`（沙箱限制），但 **.app 由 LaunchServices 拉起、不在该沙箱内，实测可用**（2026-09-23：`open ~/Applications/dsh.app` → 8s 后 HTTP 401、`launchctl print` 显示 `state = running`）
   - 附带修正：`launchctl bootout` 刚返回的一瞬 `launchctl print` 仍可能返回成功（残留状态），故两级兜底写成**顺序 if** 而非 `if/elif`
 - **2026-10-05 改造**：抽 `src/dsh-lib.sh` 共享库 + 修5 处逻辑缺陷
@@ -30,7 +30,7 @@ DSH Web GUI 的纯 UI 桌面壳：原生 WKWebView 窗口 + launchd 服务常驻
   - **`build.sh` 从 `command -v dsh` 反解真实路径**（`realpathSync` 跟软链），不再写死 `.npm-global/lib/node_modules/...`；npm prefix 一变时不会装出起不来的 plist
   - **备份统一到 `~/.dsh/backups/build/`**并只留最近 5 份；旧版把备份丢在 `~/.npm-global/bin/*.bak-*`（污染 PATH 目录，已积 6 份）和 `LaunchAgents/*.plist.bak-*`
   - token 正则放宽到非空白/引号/`&`（窄集合会匹配出被截断的无效 token）
-  - lib 自检：`bash src/dsh-lib.sh`（断言空响应兜底 000、无服务不判就绪、空锁不误删、死 pid 锁会清、活 pid 锁不删）
+  - lib 自检：`bash src/dsh-lib.sh`（断言空响应兜底 000、无服务不判就绪、空锁不误删、死 pid 锁会清、活 pid 锁不删，以及版本指纹：无记录判陈旧 / 同值判新鲜 / 软链目标变化判陈旧）
 - **2026-10-18 加固**：三处配置/流程缺陷（审查发现，均有实测证据）
   - **plist 补 `WorkingDirectory`**：launchd 默认 cwd 是 `/`（`lsof -d cwd` 实测），而 dsh 把 `process.cwd()` 传进 `profileContext` 并 spawn 子进程 —— 相对路径会落到只读的根目录。现钉在 `@HOME@`
   - **plist 补 `Umask`=63（0o077）**：`web.log` 里记录了带 token 的入口 URL（launcher 的 401 兜底要从这里抓），默认 644 让同机其他账户可读到 token、进而打开 loopback 上的完整 GUI。`build.sh` 顺手把已有日志 `chmod 600`
@@ -48,6 +48,7 @@ DSH Web GUI 的纯 UI 桌面壳：原生 WKWebView 窗口 + launchd 服务常驻
 
 ```
 进程层（launchd 常驻）    —— LaunchAgent ai.dsh.web（RunAtLoad + KeepAlive=true）
+   ↓ ProgramArguments → dsh-launch.sh（清孤儿 / 轮转日志 / 写版本指纹后 exec node）
    ↓ 127.0.0.1:3080
 launcher.sh（服务层）    —— 只做一件事：把服务等到就绪（壳调用 --ensure）
    ↓
@@ -56,7 +57,9 @@ launcher.sh（服务层）    —— 只做一件事：把服务等到就绪（�
 
 纪律：**launchd 是唯一的进程拉起方**，launcher.sh 不允许再拉起（防双实例）。服务没跑时让 launchd 拉（`launchctl kickstart -k`；服务被 bootout 过则先 `bootstrap`），不要 nohup。
 
-> 例外（2026-09-23）：**launchd 两条路都失败**时 launcher.sh 才 nohup 兜底 —— 此时 launchd 根本没托管这个服务，不存在抢 3080 的双实例，兜底只为保证「双击图标一定能用」。
+> 2026-11-09 起例外取消：旧版「两条路都失败就 nohup 手起」的兜底与 wrapper 的
+> `free_port`（清孤儿 dsh）互相打架 —— 手起的实例脱离 KeepAlive，下次还会被自己杀掉。
+> 现在明确报错，恢复方式：真终端跑 `dsh-restart`，或重启电脑让 RunAtLoad 自动装载。
 
 ## 目录结构
 
@@ -64,6 +67,7 @@ launcher.sh（服务层）    —— 只做一件事：把服务等到就绪（�
 src/
 ├── DshApp.swift                   ← 原生壳（NSWindow + WKWebView；红叉→隐藏窗口、cookie、菜单）
 ├── launcher.sh                    ← 服务就绪检查（.app 资源，壳调用 --ensure）
+├── dsh-launch.sh                  ← launchd 入口 wrapper（清孤儿 / 轮转日志 / 写版本指纹后 exec）
 ├── dsh-lib.sh                     ← 三脚本共享库（装到 ~/.dsh/lib/，自带自检）
 └── ai.dsh.web.plist               ← launchd 服务定义（模板，build.sh 渲染 @NODE@/@DSH@/@HOME@）
 build.sh                ← 组装 .app → ~/Applications + 装 launchd + 装 PATH 命令
@@ -83,7 +87,7 @@ open ~/Applications/dsh.app    # 打开原生窗口（服务没跑会自动拉�
 tail -20 ~/.dsh/shell.log      # 壳自己的启动/连接日志（不含 cookie）
 dsh-restart        # 插件更新后重启服务（等 PID 换 + HTTP 就绪，最多 30s）
 dsh-kill           # 停服务（launchd bootout；下次登录仍会自启）
-bash src/dsh-lib.sh    # 共享库自检（不碰线上服务）
+bash src/dsh-lib.sh    # 共享库自检（不碰线上服务，含版本指纹判据）
 launchctl print gui/$(id -u)/ai.dsh.web      # 查服务状态
 tail -20 ~/.dsh/web.err.log                  # 启动失败看这里
 ```
